@@ -82,7 +82,6 @@ async function solveAnyCaptcha(page, typeName = "验证码") {
                         const finalX = box.x + hasCheckbox.x;
                         const finalY = box.y + hasCheckbox.y;
                         console.log(`   >> 🎯 [瞄准目标] 正在向 ${typeName} 发射微动物理点击: (${Math.round(finalX)}, ${Math.round(finalY)})`);
-                        // 增加更像人类的滑行轨迹微动
                         await page.mouse.move(finalX - 10, finalY - 5);
                         await page.waitForTimeout(100);
                         await page.mouse.move(finalX, finalY, { steps: 6 });
@@ -135,20 +134,14 @@ async function solveAnyCaptcha(page, typeName = "验证码") {
             console.log('正在建立安全连接...');
             await page.goto('https://dashboard.katabump.com/auth/login', { waitUntil: 'domcontentloaded' });
             
-            // 核心改变：进入页面先不管输入框，全力以赴解决 Cloudflare 人机阻断
-            console.log('【核心攻坚】正在循环探测并瓦解 Cloudflare 拦截盾...');
+            console.log('【第一阶段】正在循环探测并瓦解开局 Cloudflare 拦截盾...');
             let cfPassed = false;
             for (let clickLoop = 1; clickLoop <= 5; clickLoop++) {
-                console.log(`   -> [探测第 ${clickLoop}/5 轮] 正在扫描影子节点...`);
-                const clicked = await solveAnyCaptcha(page, "Cloudflare 登录验证码");
+                const clicked = await solveAnyCaptcha(page, "开局 Cloudflare 验证码");
                 if (clicked) {
-                    console.log('   >> 👋 已成功下发物理点击，等待 5 秒观察响应...');
-                    await page.waitForTimeout(5000);
-                } else {
-                    console.log('   >> 💡 未发现验证码或可能已被自动通过，继续监测表单。');
+                    await page.waitForTimeout(4000);
                 }
 
-                // 检查真正属于输入框的独立表单是否露出来了
                 const isFormReady = await page.evaluate(() => {
                     const mailInput = document.querySelector('input[type="email"], input[name="email"]');
                     if (!mailInput) return false;
@@ -157,30 +150,40 @@ async function solveAnyCaptcha(page, typeName = "验证码") {
                 });
 
                 if (isFormReady) {
-                    console.log('   >> 🎉 成功穿透 Cloudflare 拦截盾！登录表单已完全显现。');
+                    console.log('   >> 🎉 成功穿透初始拦截！登录表单已显现。');
                     cfPassed = true;
                     break;
                 }
-                await page.waitForTimeout(2000);
+                await page.waitForTimeout(1500);
             }
 
-            // 存个照，看看到底过没过
             await page.screenshot({ path: path.join(photoDir, `${safeUsername}_盾后状态.png`), fullPage: true });
 
             console.log('正在定位表单输入框...');
             const emailInput = page.locator('input[type="email"], input[name="email"]').first();
             const passwordInput = page.locator('input[type="password"]').first();
 
-            // 使用真人敲击键盘的延迟模式输入
-            console.log('正在安全录入凭据...');
+            console.log('正在录入账号与密码凭据...');
             await emailInput.focus();
             await emailInput.fill(user.username, { delay: 50 });
-            await page.waitForTimeout(500);
+            await page.waitForTimeout(3000); // 适度拉开时序延迟
             await passwordInput.focus();
             await passwordInput.fill(user.password, { delay: 50 });
             await page.waitForTimeout(1000);
 
-            console.log('点击登录按钮...');
+            // 🌟 【终极拦截点修复】：输入表单完毕后，重新核验并二次攻坚可能被重置的 Turnstile 占位框
+            console.log('【第二阶段】正在对临门一脚的 Cloudflare Token 进行二次激活与校验...');
+            for (let retryClick = 1; retryClick <= 3; retryClick++) {
+                const reClicked = await solveAnyCaptcha(page, "临门一脚二次验证码");
+                if (reClicked) {
+                    console.log('   >> 🔒 二次物理激活信号已下发，静候安全响应...');
+                    await page.waitForTimeout(4000);
+                } else {
+                    break;
+                }
+            }
+
+            console.log('发出最终登录请求（点击 Login）...');
             await page.locator('button:has-text("Login"), button[type="submit"]').first().click();
             
             console.log('正在同步安全鉴权与 Cookie 写入 (等待 10 秒)...');
@@ -198,7 +201,7 @@ async function solveAnyCaptcha(page, typeName = "验证码") {
                 await page.waitForTimeout(6000);
             }
 
-            // 续期模块（应要求：精简重试次数，最多 3 次）
+            // 续期模块（最多重试 3 次）
             let foundRenew = false;
             for (let attempt = 1; attempt <= 3; attempt++) {
                 console.log(`\n[尝试 ${attempt}/3] 正在检查 Renew 状态...`);
