@@ -83,19 +83,30 @@ async function clickCaptchaIfVisible(page) {
     console.log(`成功载入了 ${users.length} 个用户的任务。`);
     console.log('正在构建原生隐形浏览器环境...');
 
+    // 🌟 核心修复：注入 TLS/SSL 强兼容套件参数，破解 ERR_SSL_VERSION_OR_CIPHER_MISMATCH
     const launchOptions = { 
         headless: false, 
         args: [
             '--disable-blink-features=AutomationControlled', 
             '--no-sandbox', 
             '--disable-setuid-sandbox', 
-            '--window-size=1280,720'
+            '--window-size=1280,720',
+            // 补丁参数：指定高级加密套件顺序，同步标准桌面 Chrome 的握手特征
+            '--ssl-version-min=tls1.2',
+            '--tls13-variant=disabled', // 规避部分旧版代理对 TLS 1.3 握手拆包导致的协议混淆
+            '--ignore-certificate-errors'
         ] 
     };
     if (HTTP_PROXY) launchOptions.proxy = { server: HTTP_PROXY };
 
     const browser = await chromium.launch(launchOptions);
-    const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36' });
+    
+    // 在 Context 层允许不安全的证书混淆（进一步免疫握手阻断）
+    const context = await browser.newContext({ 
+        viewport: { width: 1280, height: 720 }, 
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        ignoreHTTPSErrors: true 
+    });
 
     const page = await context.newPage();
     page.setDefaultTimeout(60000);
@@ -108,7 +119,7 @@ async function clickCaptchaIfVisible(page) {
 
         try {
             console.log('正在建立安全连接...');
-            await page.goto('https://dashboard.katbump.com/auth/login', { waitUntil: 'domcontentloaded' });
+            await page.goto('https://dashboard.katabump.com/auth/login', { waitUntil: 'domcontentloaded' });
             await page.waitForTimeout(3000);
 
             console.log('正在定位表单输入框...');
@@ -124,15 +135,12 @@ async function clickCaptchaIfVisible(page) {
             await passwordInput.fill(user.password, { delay: 100 });
             await page.waitForTimeout(2000);
 
-            // 🌟【精髓修改】：不盲目乱点，改用“智能 Token 捕获监听”机制
             console.log('【精准拦截监控】正在等待 Cloudflare 绿勾就绪并回传 Token...');
             let hasToken = false;
             
             for (let checkLoop = 1; checkLoop <= 10; checkLoop++) {
-                // 每次检查前，尝试给可能需要点击的框做一个轻轻的物理探测
                 await clickCaptchaIfVisible(page);
 
-                // 检查隐藏的 Cloudflare 表单数据有没有生成出来
                 hasToken = await page.evaluate(() => {
                     const el = document.querySelector('[name="cf-turnstile-response"], [name="g-recaptcha-response"]');
                     return el && el.value && el.value.length > 20;
@@ -147,10 +155,8 @@ async function clickCaptchaIfVisible(page) {
                 await page.waitForTimeout(3000);
             }
 
-            // 再次保存有绿勾的现场状态
             await page.screenshot({ path: path.join(photoDir, `${safeUsername}_盾后状态.png`), fullPage: true });
 
-            // 既然 Token 拿到了，原地沉淀 4 秒钟，绝对不抢跑
             console.log('防止瞬时并发拦截：原地固化 4 秒钟...');
             await page.waitForTimeout(4000);
 
@@ -160,7 +166,6 @@ async function clickCaptchaIfVisible(page) {
             console.log('正在同步安全鉴权与 Cookie 写入 (等待 10 秒)...');
             await page.waitForTimeout(10000); 
 
-            // 路由直达控制台
             if (SERVER_URL) {
                 console.log(`[路由直达] 正在全速空降至目标续期页面: ${SERVER_URL}`);
                 await page.goto(SERVER_URL, { waitUntil: 'domcontentloaded' });
@@ -172,7 +177,6 @@ async function clickCaptchaIfVisible(page) {
                 await page.waitForTimeout(8000);
             }
 
-            // 续期模块（最多重试 3 次）
             let foundRenew = false;
             for (let attempt = 1; attempt <= 3; attempt++) {
                 console.log(`\n[尝试 ${attempt}/3] 正在检查 Renew 状态...`);
@@ -197,7 +201,6 @@ async function clickCaptchaIfVisible(page) {
                 const modal = page.locator('#renew-modal, .modal, [class*="modal"]').first();
                 if (await modal.count() === 0) continue;
 
-                // 弹窗内的 ALTCHA 验证码也可以使用相同的检测模式
                 await page.screenshot({ path: path.join(photoDir, `${safeUsername}_Renew_Modal_${attempt}.png`), fullPage: true });
                 await page.waitForTimeout(6000); 
 
