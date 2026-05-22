@@ -23,6 +23,8 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y xvfb
         npm install
+        # 确保下载好配套的底层内置浏览器
+        npx playwright install chromium
         npx playwright install-deps chrome
       
     - name: Run Renew Script
@@ -32,7 +34,6 @@ jobs:
         HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
         TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
         TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-      # 使用 xvfb-run 模拟有头环境运行原生的高级 Node 脚本
       run: xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node action_renew.js
 
     - name: Upload Screenshots
