@@ -12,7 +12,7 @@ from scrapling import Fetcher
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 HTTP_PROXY = os.getenv("HTTP_PROXY")
-USERS_JSON = os.getenv("USERS_JSON", "[]")
+USERS_JSON = os.getenv("USERS_JSON", "").strip()
 
 # 初始化截图目录
 SCREENSHOT_DIR = Path("screenshots")
@@ -26,7 +26,7 @@ def send_telegram_message(message, image_path=None):
     
     # 1. 发送文字消息
     try:
-        url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+        url = f"https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage"
         requests.post(url, json={
             "chat_id": TG_CHAT_ID,
             "text": message,
@@ -40,7 +40,7 @@ def send_telegram_message(message, image_path=None):
     if image_path and Path(image_path).exists():
         try:
             print("[Telegram] 正在发送快照...")
-            url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto"
+            url = f"https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto"
             with open(image_path, "rb") as photo:
                 requests.post(url, data={"chat_id": TG_CHAT_ID}, files={"photo": photo}, timeout=15)
             print("[Telegram] 快照发送成功。")
@@ -49,15 +49,36 @@ def send_telegram_message(message, image_path=None):
 
 
 def get_users():
-    """解析用户凭据 JSON"""
+    """强力容错解析用户凭据 JSON，自动修复 GitHub 传输导致的引号丢失问题"""
+    if not USERS_JSON:
+        return []
+        
+    print(f"收到原始明文长度: {len(USERS_JSON)} 字符")
+    
+    # 尝试标准解析
     try:
         parsed = json.loads(USERS_JSON)
-        if isinstance(parsed, list):
-            return parsed
-        elif isinstance(parsed, dict):
-            return parsed.get("users", [])
+        if isinstance(parsed, list): return parsed
+        if isinstance(parsed, dict): return parsed.get("users", [])
+    except Exception:
+        pass
+
+    # 如果标准解析失败，说明引号在传递中被破坏，使用智能正则补全引号后重新尝试
+    try:
+        print("[提示] 发现标准 JSON 格式受损，正在启动智能修复补全引号...")
+        # 补全键名和字符串值上的双引号
+        fixed_json = USERS_JSON
+        # 把没有引号的键名补上引号 (例如 username: -> "username":)
+        fixed_json = re.sub(r'([{,]\s*)([a-zA-Z0-9_]+)\s*:', r'\1"\2":', fixed_json)
+        # 把紧跟在冒号后面的无引号字符串值补上引号 (不包含以 [ 或 { 开始的)
+        fixed_json = re.sub(r':\s*([a-zA-Z0-9_\-\.]+)\s*([,}\]])', r':"\1"\2', fixed_json)
+        
+        parsed = json.loads(fixed_json)
+        if isinstance(parsed, list): return parsed
+        if isinstance(parsed, dict): return parsed.get("users", [])
     except Exception as e:
-        print(f"解析 USERS_JSON 错误: {e}")
+        print(f"❌ 深度智能修复依然失败: {e}")
+        
     return []
 
 
@@ -85,8 +106,11 @@ def main():
         for idx, user in enumerate(users):
             username = user.get("username")
             password = user.get("password")
+            if not username or not password:
+                print(f"⚠️ 跳过第 {idx+1} 个用户：配置信息不完整")
+                continue
+                
             safe_username = re.sub(r"[^a-zA-Z0-9]", "_", username)
-            
             print(f"\n=== 正在处理用户 {idx + 1}/{len(users)} ===")
 
             try:
