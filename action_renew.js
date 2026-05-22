@@ -46,29 +46,16 @@ function getUsers() {
 }
 
 /**
- * 智能影子节点验证码穿透
+ * 影子节点兜底物理点击
  */
-async function solveAnyCaptcha(page, typeName = "验证码") {
+async function clickCaptchaIfVisible(page) {
     const allFrames = page.frames();
     for (const frame of allFrames) {
         try {
             const hasCheckbox = await frame.evaluate(() => {
-                function findCheckboxInShadow(root) {
-                    if (!root) return null;
-                    const el = root.querySelector('input[type="checkbox"], #cf-stage input, .cf-turnstile input');
-                    if (el) return el;
-                    const children = root.querySelectorAll('*');
-                    for (const child of children) {
-                        if (child.shadowRoot) {
-                            const found = findCheckboxInShadow(child.shadowRoot);
-                            if (found) return found;
-                        }
-                    }
-                    return null;
-                }
-                const foundEl = findCheckboxInShadow(document);
-                if (foundEl) {
-                    const rect = foundEl.getBoundingClientRect();
+                const el = document.querySelector('input[type="checkbox"], #cf-stage input, .cf-turnstile input');
+                if (el) {
+                    const rect = el.getBoundingClientRect();
                     return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, visible: rect.width > 0 && rect.height > 0 };
                 }
                 return null;
@@ -79,20 +66,9 @@ async function solveAnyCaptcha(page, typeName = "验证码") {
                 if (iframeElement) {
                     const box = await iframeElement.boundingBox();
                     if (box) {
-                        const finalX = box.x + hasCheckbox.x;
-                        const finalY = box.y + hasCheckbox.y;
-                        console.log(`   >> 🎯 [瞄准目标] 正在向 ${typeName} 发射物理点击: (${Math.round(finalX)}, ${Math.round(finalY)})`);
-                        await page.mouse.move(finalX - 5, finalY - 5);
-                        await page.waitForTimeout(100);
-                        await page.mouse.move(finalX, finalY, { steps: 5 });
-                        await page.mouse.down();
-                        await page.waitForTimeout(150);
-                        await page.mouse.up();
+                        await page.mouse.click(box.x + hasCheckbox.x, box.y + hasCheckbox.y);
                         return true;
                     }
-                } else {
-                    await page.mouse.click(hasCheckbox.x, hasCheckbox.y);
-                    return true;
                 }
             }
         } catch (e) { }
@@ -132,7 +108,7 @@ async function solveAnyCaptcha(page, typeName = "验证码") {
 
         try {
             console.log('正在建立安全连接...');
-            await page.goto('https://dashboard.katabump.com/auth/login', { waitUntil: 'domcontentloaded' });
+            await page.goto('https://dashboard.katbump.com/auth/login', { waitUntil: 'domcontentloaded' });
             await page.waitForTimeout(3000);
 
             console.log('正在定位表单输入框...');
@@ -142,41 +118,41 @@ async function solveAnyCaptcha(page, typeName = "验证码") {
 
             console.log('正在录入账号与密码凭据...');
             await emailInput.focus();
-            await emailInput.fill(user.username, { delay: 60 });
+            await emailInput.fill(user.username, { delay: 100 });
             await page.waitForTimeout(1000);
             await passwordInput.focus();
-            await passwordInput.fill(user.password, { delay: 60 });
+            await passwordInput.fill(user.password, { delay: 100 });
             await page.waitForTimeout(2000);
 
-            console.log('【独家特训】开始攻坚 Cloudflare 登录验证盾...');
-            let passed = false;
-            for (let clickLoop = 1; clickLoop <= 5; clickLoop++) {
-                console.log(`   -> [尝试第 ${clickLoop}/5 次点击验证框]`);
-                const clicked = await solveAnyCaptcha(page, "Cloudflare 登录验证码");
-                
-                // 给验证码响应和打绿勾的时间
-                await page.waitForTimeout(5000);
+            // 🌟【精髓修改】：不盲目乱点，改用“智能 Token 捕获监听”机制
+            console.log('【精准拦截监控】正在等待 Cloudflare 绿勾就绪并回传 Token...');
+            let hasToken = false;
+            
+            for (let checkLoop = 1; checkLoop <= 10; checkLoop++) {
+                // 每次检查前，尝试给可能需要点击的框做一个轻轻的物理探测
+                await clickCaptchaIfVisible(page);
 
-                // 保存现场快照看看勾上没有
-                await page.screenshot({ path: path.join(photoDir, `${safeUsername}_盾后状态.png`), fullPage: true });
-
-                // 检查隐藏的 cf-turnstile-response 的值是不是已经被注入进去了（代表 CF 真正放行）
-                const hasToken = await page.evaluate(() => {
+                // 检查隐藏的 Cloudflare 表单数据有没有生成出来
+                hasToken = await page.evaluate(() => {
                     const el = document.querySelector('[name="cf-turnstile-response"], [name="g-recaptcha-response"]');
-                    return el && el.value && el.value.length > 10;
+                    return el && el.value && el.value.length > 20;
                 });
 
                 if (hasToken) {
-                    console.log('   >> 🎉 [大获全胜] 检测到加密 Token 已成功写入底层表单！');
-                    passed = true;
+                    console.log(`   >> 🎉 [就绪] 底层 Token 写入成功 (第 ${checkLoop} 轮核验通过)`);
                     break;
                 }
-                console.log('   >> ⏳ Token 尚未就绪，准备进行增量补点击...');
+
+                console.log(`   >> ⏳ Token 仍在生成中，网页正在自动进行无感鉴权，等待 3 秒... (${checkLoop}/10)`);
+                await page.waitForTimeout(3000);
             }
 
-            // 🌟 核心防踩坑：即使勾上了，也原地稳稳死等 3.5 秒，让网站底层把参数全部咬合完毕
-            console.log('沉淀安全态势：原地静止 3.5 秒以确保 Token 固化...');
-            await page.waitForTimeout(3500);
+            // 再次保存有绿勾的现场状态
+            await page.screenshot({ path: path.join(photoDir, `${safeUsername}_盾后状态.png`), fullPage: true });
+
+            // 既然 Token 拿到了，原地沉淀 4 秒钟，绝对不抢跑
+            console.log('防止瞬时并发拦截：原地固化 4 秒钟...');
+            await page.waitForTimeout(4000);
 
             console.log('发出最终登录请求（点击 Login）...');
             await page.locator('button:has-text("Login"), button[type="submit"]').first().click();
@@ -188,7 +164,6 @@ async function solveAnyCaptcha(page, typeName = "验证码") {
             if (SERVER_URL) {
                 console.log(`[路由直达] 正在全速空降至目标续期页面: ${SERVER_URL}`);
                 await page.goto(SERVER_URL, { waitUntil: 'domcontentloaded' });
-                // 空降过去后多等一会儿，防止页面是白屏骨架
                 await page.waitForTimeout(8000);
             } else {
                 console.log('[路由自动] 正在寻找控制台入口...');
@@ -222,9 +197,7 @@ async function solveAnyCaptcha(page, typeName = "验证码") {
                 const modal = page.locator('#renew-modal, .modal, [class*="modal"]').first();
                 if (await modal.count() === 0) continue;
 
-                console.log('触发影子节点扫描：尝试穿透破解弹窗 ALTCHA 验证码...');
-                await solveAnyCaptcha(page, "弹窗 ALTCHA 验证码");
-
+                // 弹窗内的 ALTCHA 验证码也可以使用相同的检测模式
                 await page.screenshot({ path: path.join(photoDir, `${safeUsername}_Renew_Modal_${attempt}.png`), fullPage: true });
                 await page.waitForTimeout(6000); 
 
