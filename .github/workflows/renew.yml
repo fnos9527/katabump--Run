@@ -23,8 +23,11 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y xvfb curl
         python -m pip install --upgrade pip
-        # 使用 [playwright] 扩展标记完整安装隐形动态浏览器所需的所有底层依赖
-        pip install "scrapling[playwright]" requests
+        
+        # 强制直接安装所有必需的依赖包，彻底绕过 click 和浏览器环境缺失问题
+        pip install scrapling requests click playwright camoufox
+        
+        # 初始化并安装 Scrapling 的隐形浏览器内核
         scrapling install
       
     - name: Run Renew Script
