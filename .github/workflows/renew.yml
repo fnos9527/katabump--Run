@@ -18,22 +18,96 @@ jobs:
       with:
         node-version: '20'
         
-    - name: Install Dependencies
+    - name: Install System Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y xvfb
+        sudo apt-get install -y xvfb curl jq
+        
+    - name: Install Project Dependencies
+      run: |
         npm install
-        # 确保下载好配套的底层内置浏览器
         npx playwright install chromium
         npx playwright install-deps chrome
-      
+
+    - name: Setup and Run Xray (Convert VLESS to Socks5)
+      env:
+        # 读取你填写的 VLESS 节点变量
+        HTTP_PROXY_RAW: ${{ secrets.HTTP_PROXY }}
+      run: |
+        echo "正在下载并安装 Xray-core..."
+        # 下载官方最新 Xray-core
+        curl -L -H "Cache-Control: no-cache" -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+        unzip -q xray.zip -d xray-bin
+        chmod +x ./xray-bin/xray
+        
+        echo "正在将 VLESS 节点转换为 Xray 配置文件..."
+        # 提取 VLESS 的关键核心参数（UUID, IP, Port, Path, Host 等）
+        UUID=$(echo "$HTTP_PROXY_RAW" | sed -n 's/vless:\/\/\([^@]*\)@.*/\1/p')
+        SERVER=$(echo "$HTTP_PROXY_RAW" | sed -n 's/.*@\([^:]*\):.*/\1/p')
+        PORT=$(echo "$HTTP_PROXY_RAW" | sed -n 's/.*:\([0-9]*\).*/\1/p')
+        WS_PATH=$(echo "$HTTP_PROXY_RAW" | sed -n 's/.*path=\([^&]*\).*/\1/p' | sed 's/%2F/\//g')
+        HOST=$(echo "$HTTP_PROXY_RAW" | sed -n 's/.*host=\([^&]*\).*/\1/p')
+        SNI=$(echo "$HTTP_PROXY_RAW" | sed -n 's/.*sni=\([^&]*\).*/\1/p')
+
+        # 动态创建 xray json 配置文件
+        cat <<EOF > config.json
+        {
+          "log": { "loglevel": "warning" },
+          "inbounds": [
+            {
+              "port": 10808,
+              "protocol": "socks",
+              "settings": { "auth": "noauth", "udp": true }
+            }
+          ],
+          "outbounds": [
+            {
+              "protocol": "vless",
+              "settings": {
+                "vnext": [
+                  {
+                    "address": "$SERVER",
+                    "port": $PORT,
+                    "users": [
+                      { "id": "$UUID", "encryption": "none", "level": 0 }
+                    ]
+                  }
+                ]
+              },
+              "streamSettings": {
+                "network": "ws",
+                "security": "tls",
+                "tlsSettings": {
+                  "allowInsecure": true,
+                  "serverName": "$SNI"
+                },
+                "wsSettings": {
+                  "path": "$WS_PATH",
+                  "headers": { "Host": "$HOST" }
+                }
+              }
+            }
+          ]
+        }
+        EOF
+
+        echo "正在后台启动 Xray 代理服务..."
+        ./xray-bin/xray -config config.json > xray.log 2>&1 &
+        
+        echo "等待代理通道建立..."
+        sleep 3
+        
+        # 简单测一下本地 Socks5 通道是不是通的
+        curl --socks5-hostname 127.0.0.1:10808 https://www.google.com -I || echo "警告: 本地代理测试未响应，将继续尝试运行..."
+
     - name: Run Renew Script
       env:
         USERS_JSON: ${{ secrets.USERS_JSON }}
         SERVER_URL: ${{ secrets.SERVER_URL }}
-        HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
         TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
         TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        # 关键：告诉 Playwright 脚本，直接走刚转好的本地标准 Socks5 代理！
+        HTTP_PROXY: "socks5://127.0.0.1:10808"
       run: xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node action_renew.js
 
     - name: Upload Screenshots
