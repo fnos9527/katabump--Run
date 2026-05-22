@@ -23,8 +23,8 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y xvfb curl
         python -m pip install --upgrade pip
-        # 安装 scrapling, requests 及其 Playwright 浏览器依赖
-        pip install scrapling requests
+        # 使用 [playwright] 扩展标记完整安装隐形动态浏览器所需的所有底层依赖
+        pip install "scrapling[playwright]" requests
         scrapling install
       
     - name: Run Renew Script
