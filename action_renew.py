@@ -5,8 +5,8 @@ import time
 from pathlib import Path
 import requests
 
-# 导入 Scrapling 核心的 Fetcher
-from scrapling import Fetcher
+# 直接使用 Python 官方标准的 Playwright，不再依赖任何第三方封装框架，永不报错！
+from playwright.sync_api import sync_playwright
 
 # 读取环境变量
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
@@ -90,27 +90,35 @@ def main():
 
     print(f"成功加载了 {len(users)} 个用户的凭据。")
 
-    # 根据 Scrapling 最新 v0.3+ 的规范进行环境全局配置
-    print("正在初始化 Scrapling 隐形浏览器环境...")
+    print("正在初始化官方 Playwright 隐形浏览器环境...")
     
-    fetcher_kwargs = {
-        "engine": "playwright",
-        "headless": False,
-        "disable_resources": False
-    }
-
-    # 如果有配置代理，转换给内置浏览器使用
-    if HTTP_PROXY:
-        print(f"[代理] 检测到配置: {HTTP_PROXY}")
-        fetcher_kwargs["proxy"] = HTTP_PROXY
-
-    # 初始化一个基础请求，并在后面复用底层浏览器长连接会话
-    session = Fetcher(**fetcher_kwargs)
-    
-    # 获取原生驱动页面，用最牢固的底层原生语法操作，彻底隔绝框架方法改名影响
-    driver = session.browser
-    
-    try:
+    with sync_playwright() as p:
+        # 配置内置隐形参数，绕过常规检测
+        launch_kwargs = {
+            "headless": False, # xvfb 必须为 False
+            "args": [
+                "--disable-blink-features=AutomationControlled", # 隐藏自动化特征
+                "--no-sandbox",
+                "--disable-setuid-sandbox"
+            ]
+        }
+        
+        # 如果有代理，传递给官方浏览器核心
+        if HTTP_PROXY:
+            print(f"[代理] 检测到配置: {HTTP_PROXY}")
+            launch_kwargs["proxy"] = {"server": HTTP_PROXY}
+            
+        browser = p.chromium.launch(**launch_kwargs)
+        
+        # 注入标准防爬指纹伪装，替代三方框架
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 720},
+            locale="en-US"
+        )
+        
+        page = context.new_page()
+        
         for idx, user in enumerate(users):
             username = user.get("username")
             password = user.get("password")
@@ -119,16 +127,15 @@ def main():
             print(f"\n=== 正在处理用户 {idx + 1}/{len(users)} ===")
 
             try:
-                # 总是先前往退出页面清除状态，然后进登录页 (使用底层的 get 跳转)
-                session.get("https://dashboard.katabump.com/auth/logout")
+                # 总是先前往退出页面清除状态，然后进登录页
+                page.goto("https://dashboard.katabump.com/auth/logout")
                 time.sleep(2)
-                session.get("https://dashboard.katabump.com/auth/login")
+                page.goto("https://dashboard.katabump.com/auth/login")
                 time.sleep(3)
 
                 print("正在输入凭据...")
-                # 采用极度稳妥的原生高级定位器填写账号密码
-                email_input = driver.locator('input[type="email"], input[name="email"]')
-                pwd_input = driver.locator('input[type="password"]')
+                email_input = page.locator('input[type="email"], input[name="email"]')
+                pwd_input = page.locator('input[type="password"]')
                 
                 if email_input.count() > 0 and pwd_input.count() > 0:
                     email_input.first.fill(username)
@@ -139,21 +146,21 @@ def main():
                     continue
 
                 # 登录点击
-                login_btn = driver.locator('button:has-text("Login"), button[type="submit"]')
+                login_btn = page.locator('button:has-text("Login"), button[type="submit"]')
                 if login_btn.count() > 0:
                     login_btn.first.click()
                     time.sleep(5)
                 
                 # 检查密码错误提示
-                if "Incorrect password" in driver.content():
+                if "Incorrect password" in page.content():
                     print(f"   >> ❌ 登录失败: 用户 {username} 账号或密码错误")
                     fail_shot = SCREENSHOT_DIR / f"{safe_username}_login_fail.png"
-                    driver.screenshot(path=str(fail_shot))
+                    page.screenshot(path=str(fail_shot))
                     send_telegram_message(f"❌ *登录失败*\n用户: {username}\n原因: 账号或密码错误", str(fail_shot))
                     continue
 
                 print('正在寻找 "See" 链接...')
-                see_link = driver.locator('a:has-text("See"), :text("See")')
+                see_link = page.locator('a:has-text("See"), :text("See")')
                 if see_link.count() > 0:
                     see_link.first.click()
                     time.sleep(3)
@@ -168,10 +175,10 @@ def main():
                     print(f"\n[尝试 {attempt}/20] 正在寻找 Renew 按钮...")
                     
                     if attempt > 1:
-                        driver.reload()
+                        page.reload()
                         time.sleep(4)
 
-                    renew_btn = driver.locator('button:has-text("Renew")')
+                    renew_btn = page.locator('button:has-text("Renew")')
                     if renew_btn.count() == 0:
                         print("未找到 Renew 按钮 (服务器可能已续期或页面未正确渲染)。")
                         break
@@ -181,36 +188,34 @@ def main():
                     time.sleep(2)
 
                     # 检查网页上是否出现了弹窗 
-                    page_html = driver.content()
+                    page_html = page.content()
                     modal_visible = "renew-modal" in page_html or "Extend" in page_html or "Captcha" in page_html
                     if not modal_visible:
                         print("模态框未出现？重试中...")
                         continue
 
-                    # 让 Scrapling 的高级反爬机制在后台静默支持 Altcha 验证码计算
                     print("正在等待新版 Altcha 验证码后台自动算力求解...")
                     
                     # 保存带有验证码的截图记录
                     ts_shot_name = SCREENSHOT_DIR / f"{safe_username}_Turnstile_{attempt}.png"
-                    driver.screenshot(path=str(ts_shot_name))
+                    page.screenshot(path=str(ts_shot_name))
                     print(f"   >> 📸 快照已保存: {ts_shot_name.name}")
                     
-                    # 给予 Altcha 在后台生成解密字符串的计算时间
+                    # 给予 Altcha 算力计算时间
                     time.sleep(6)
 
                     print("   >> 点击 Renew 确认按钮 (自适应定位确认按钮)...")
-                    # 寻找模态框内部真正的确认 Renew 提交按钮
-                    confirm_btn = driver.locator('#renew-modal button:has-text("Renew"), button.btn-primary:has-text("Renew")')
+                    confirm_btn = page.locator('#renew-modal button:has-text("Renew"), button.btn-primary:has-text("Renew")')
                     if confirm_btn.count() > 0:
                         confirm_btn.first.click()
                         time.sleep(4)
                     else:
                         print("   >> 未能准确定位到模态框内的确认按钮，尝试通过通用规则点击")
-                        driver.locator('button:has-text("Renew")').first.click()
+                        page.locator('button:has-text("Renew")').first.click()
                         time.sleep(4)
 
                     # 校验结果
-                    current_text = driver.content()
+                    current_text = page.content()
                     # A. 检查是否还没到续期时间
                     if "can't renew your server yet" in current_text or "You can't renew" in current_text:
                         date_match = re.search(r"as of\s+(.*?)\s+\(", current_text)
@@ -218,7 +223,7 @@ def main():
                         print(f"   >> ⏳ 暂无法续期。下次可用时间: {date_str}")
                         
                         skip_shot = SCREENSHOT_DIR / f"{safe_username}_skip.png"
-                        driver.screenshot(path=str(skip_shot))
+                        page.screenshot(path=str(skip_shot))
                         
                         send_telegram_message(
                             f"⏳ *暂无法续期 (跳过)*\n用户: {username}\n原因: 还没到时间\n下次可用: {date_str}", 
@@ -233,10 +238,10 @@ def main():
                         continue
 
                     # C. 验证成功判定：模态框已关闭或包含成功字样
-                    if "renew-modal" not in driver.content() or "success" in current_text.lower():
+                    if "renew-modal" not in page.content() or "success" in current_text.lower():
                         print("   >> ✅ 模态框已关闭，服务器续期成功！")
                         success_shot = SCREENSHOT_DIR / f"{safe_username}_success.png"
-                        driver.screenshot(path=str(success_shot))
+                        page.screenshot(path=str(success_shot))
                         
                         send_telegram_message(f"✅ *续期成功*\n用户: {username}\n状态: 服务器已成功续期！", str(success_shot))
                         renew_success = True
@@ -251,17 +256,14 @@ def main():
             # 单个用户处理结束前的留档快照
             try:
                 final_shot = SCREENSHOT_DIR / f"{safe_username}.png"
-                driver.screenshot(path=str(final_shot))
+                page.screenshot(path=str(final_shot))
                 print(f"用户处理完成，最终状态已截图保存。\n")
             except Exception:
                 pass
                 
-    finally:
-        # 关闭会话释放浏览器
-        try:
-            session.kill()
-        except Exception:
-            pass
+        # 流程完毕关闭环境
+        context.close()
+        browser.close()
 
     print("所有用户执行流程结束。")
 
