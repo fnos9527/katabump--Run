@@ -12,20 +12,30 @@ const TG_CHAT_ID = process.env.TG_CHAT_ID;
 const SERVER_URL = process.env.SERVER_URL ? process.env.SERVER_URL.trim() : '';
 const HTTP_PROXY = process.env.HTTP_PROXY;
 
-// --- [辅助函数] ---
+// --- [修复后的数据读取逻辑] ---
 function getUsers() {
-    // 这里保持你原有的读取逻辑
-    return JSON.parse(process.env.USERS_JSON || '[]');
-}
+    const raw = process.env.USERS_JSON || '';
+    if (!raw) return [];
+    
+    // 尝试解析 JSON，如果失败则按行解析文本
+    try {
+        if (raw.trim().startsWith('[')) return JSON.parse(raw);
+    } catch (e) {}
 
-async function sendTelegram(msg) {
-    if (!TG_BOT_TOKEN) return;
-    try { await axios.post(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, { chat_id: TG_CHAT_ID, text: msg }); } catch (e) {}
+    return raw.split('\n').map(line => {
+        const [username, password] = line.trim().split(':');
+        return (username && password) ? { username: username.trim(), password: password.trim() } : null;
+    }).filter(Boolean);
 }
 
 // --- [核心执行逻辑] ---
 (async () => {
     const users = getUsers();
+    if (users.length === 0) {
+        console.error("未发现有效的用户凭据，请检查 USERS_JSON 变量！");
+        process.exit(1);
+    }
+
     const browser = await chromium.launch({ 
         headless: false, 
         args: ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--window-size=1280,720'] 
@@ -55,8 +65,8 @@ async function sendTelegram(msg) {
         await page.locator('input[type="email"]').fill(user.username);
         await page.locator('input[type="password"]').fill(user.password);
         
-        // 【关键】确保绿勾就绪
-        console.log(">> 等待 Token 就绪...");
+        // 确保 Token 就绪
+        console.log(">> 等待 Cloudflare Token 就绪...");
         for(let i=0; i<10; i++) {
             const hasToken = await page.evaluate(() => document.querySelector('[name="cf-turnstile-response"]')?.value?.length > 20);
             if(hasToken) break;
@@ -64,34 +74,32 @@ async function sendTelegram(msg) {
         }
 
         await page.locator('button[type="submit"]').click();
-        await page.waitForTimeout(8000);
+        await page.waitForTimeout(10000);
 
-        // 3. 续期流程 (带自动重试)
+        // 3. 续期流程
         if (SERVER_URL) await page.goto(SERVER_URL, { waitUntil: 'domcontentloaded' });
         
         let success = false;
         for (let attempt = 1; attempt <= 3; attempt++) {
-            console.log(`>> 检查 Renew 按钮 (尝试 ${attempt}/3)`);
+            console.log(`>> 尝试续期 (第 ${attempt} 次)`);
             const renewBtn = page.locator('button:has-text("Renew")').first();
             
             if (await renewBtn.isVisible()) {
                 await renewBtn.click();
                 await page.waitForTimeout(3000);
                 
-                // 确认弹窗内的再次续期
-                const modalBtn = page.locator('button:has-text("Confirm")').first(); // 假设弹窗按钮名为 Confirm
-                if (await modalBtn.isVisible()) await modalBtn.click();
+                // 点击弹窗确认
+                const confirmBtn = page.locator('button:has-text("Confirm"), button:has-text("Renew")').last();
+                if (await confirmBtn.isVisible()) await confirmBtn.click();
                 
-                console.log(">> 续期操作执行完毕");
                 success = true;
-                await sendTelegram(`✅ ${user.username} 续期成功`);
+                console.log(">> 续期完成");
                 break;
             }
             await page.reload();
             await page.waitForTimeout(5000);
         }
         
-        if (!success) await sendTelegram(`❌ ${user.username} 续期失败`);
         await page.close();
     }
     await browser.close();
