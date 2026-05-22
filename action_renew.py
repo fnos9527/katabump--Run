@@ -5,8 +5,8 @@ import time
 from pathlib import Path
 import requests
 
-# 导入 Scrapling 的隐形动态提取器和新版会话适配器
-from scrapling import Fetcher, Adaptor
+# 导入 Scrapling 核心的 Fetcher
+from scrapling import Fetcher
 
 # 读取环境变量
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
@@ -92,7 +92,8 @@ def main():
 
     # 配置隐形浏览器环境
     fetcher_kwargs = {
-        "headless": False,       # xvfb 环境下必须设为 False（即有头模式）以激活指纹渲染
+        "engine": "playwright",   # 直接指定使用动态 playwright 引擎
+        "headless": False,        # xvfb 环境下必须设为 False（即有头模式）以激活指纹渲染
         "disable_resources": False # 允许加载图片和样式，以保证验证码和模态框能正确生成
     }
 
@@ -103,9 +104,10 @@ def main():
 
     print("正在初始化 Scrapling 隐形浏览器...")
     
-    # 修正：在新版 Scrapling 中，直接使用 Adaptor 管理长连接会话（对应旧版的 start_session）
-    with Adaptor(engine="playwright", **fetcher_kwargs) as session:
-        
+    # 彻底修复：直接初始化 Fetcher 长连接会话，不依赖不稳定的新版类名
+    session = Fetcher(**fetcher_kwargs)
+    
+    try:
         for idx, user in enumerate(users):
             username = user.get("username")
             password = user.get("password")
@@ -248,6 +250,13 @@ def main():
                 print(f"用户处理完成，最终状态已截图保存。\n")
             except Exception:
                 pass
+                
+    finally:
+        # 关闭会话释放浏览器
+        try:
+            session.kill()
+        except Exception:
+            pass
 
     print("所有用户执行流程结束。")
 
