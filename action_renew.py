@@ -5,8 +5,8 @@ import time
 from pathlib import Path
 import requests
 
-# 导入 Scrapling 的隐形动态提取器
-from scrapling import Fetcher
+# 导入 Scrapling 的隐形动态提取器和新版会话适配器
+from scrapling import Fetcher, Adaptor
 
 # 读取环境变量
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
@@ -49,13 +49,13 @@ def send_telegram_message(message, image_path=None):
 
 
 def get_users():
-    """全新升级：兼容旧 JSON 格式，同时强力支持更直观的【账号:密码】多行文本格式"""
+    """纯文本格式解析凭据【账号:密码】多行文本格式"""
     if not USERS_JSON:
         return []
         
     print(f"收到原始明文长度: {len(USERS_JSON)} 字符")
     
-    # 1. 首先尝试当做标准 JSON 解析
+    # 首先尝试当做标准 JSON 解析
     if USERS_JSON.startswith("[") or USERS_JSON.startswith("{"):
         try:
             parsed = json.loads(USERS_JSON)
@@ -64,17 +64,14 @@ def get_users():
         except Exception:
             pass
 
-    # 2. 如果不是 JSON 或者 JSON 解析失败，则使用最稳妥的多行文本解析拆分
     print("[提示] 正在使用多行纯文本格式解析凭据...")
     users_list = []
-    # 按行切割
     lines = USERS_JSON.splitlines()
     for line in lines:
         line = line.strip()
         if not line or ":" not in line:
             continue
         
-        # 使用冒号分割账号和密码 (仅分割第一个冒号，防止密码里带冒号)
         parts = line.split(":", 1)
         if len(parts) == 2:
             username = parts[0].strip()
@@ -95,8 +92,8 @@ def main():
 
     # 配置隐形浏览器环境
     fetcher_kwargs = {
-        "headless": False,  # xvfb 环境下必须设为 False（即有头）以激活高成功率的图形渲染
-        "auto_match": True  # 启用智能自适应定位
+        "headless": False,       # xvfb 环境下必须设为 False（即有头模式）以激活指纹渲染
+        "disable_resources": False # 允许加载图片和样式，以保证验证码和模态框能正确生成
     }
 
     # 如果有配置代理，转换给内置浏览器使用
@@ -105,8 +102,9 @@ def main():
         fetcher_kwargs["proxy"] = HTTP_PROXY
 
     print("正在初始化 Scrapling 隐形浏览器...")
-    # 建立持久化会话，复用指纹防风控识别
-    with Fetcher.start_session(**fetcher_kwargs) as session:
+    
+    # 修正：在新版 Scrapling 中，直接使用 Adaptor 管理长连接会话（对应旧版的 start_session）
+    with Adaptor(engine="playwright", **fetcher_kwargs) as session:
         
         for idx, user in enumerate(users):
             username = user.get("username")
@@ -120,10 +118,10 @@ def main():
                 session.go_to("https://dashboard.katabump.com/auth/logout")
                 time.sleep(2)
                 page = session.go_to("https://dashboard.katabump.com/auth/login")
-                time.sleep(2)
+                time.sleep(3)
 
                 print("正在输入凭据...")
-                # 自动适应各种变体，填写邮箱与密码
+                # 智能识别输入框
                 email_input = page.get_selector('input[type="email"]') or page.get_selector('input[name="email"]')
                 pwd_input = page.get_selector('input[type="password"]')
                 
@@ -139,7 +137,7 @@ def main():
                 login_btn = page.get_selector('button:has-text("Login")') or page.get_selector('button[type="submit"]')
                 if login_btn:
                     login_btn.click()
-                    time.sleep(4)
+                    time.sleep(5)
                 
                 # 检查密码错误提示
                 if "Incorrect password" in page.text:
@@ -153,7 +151,7 @@ def main():
                 see_link = page.get_selector('a:has-text("See")') or page.get_selector(':text("See")')
                 if see_link:
                     see_link.click()
-                    time.sleep(2)
+                    time.sleep(3)
                 else:
                     print("未找到 \"See\" 按钮，跳过该用户。")
                     continue
@@ -166,7 +164,7 @@ def main():
                     
                     if attempt > 1:
                         page = session.refresh()
-                        time.sleep(3)
+                        time.sleep(4)
 
                     renew_btn = page.get_selector('button:has-text("Renew")')
                     if not renew_btn:
@@ -191,7 +189,7 @@ def main():
                     page.screenshot(path=str(ts_shot_name))
                     print(f"   >> 📸 快照已保存: {ts_shot_name.name}")
                     
-                    # 给予 Altcha 在后台生成解密字符串的计算时间（一般5-6秒最佳）
+                    # 给予 Altcha 在后台生成解密字符串的计算时间
                     time.sleep(6)
 
                     print("   >> 点击 Renew 确认按钮 (自适应定位确认按钮)...")
@@ -199,11 +197,11 @@ def main():
                     confirm_btn = page.get_selector('#renew-modal button:has-text("Renew")') or page.get_selector('button.btn-primary:has-text("Renew")')
                     if confirm_btn:
                         confirm_btn.click()
-                        time.sleep(3)
+                        time.sleep(4)
                     else:
                         print("   >> 未能准确定位到模态框内的确认按钮，尝试通过通用规则点击")
                         page.click('button:has-text("Renew")')
-                        time.sleep(3)
+                        time.sleep(4)
 
                     # 校验结果
                     # A. 检查是否还没到续期时间
