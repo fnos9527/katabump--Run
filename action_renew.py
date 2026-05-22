@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 import requests
 
-# 直接使用 Python 官方标准的 Playwright，不再依赖任何第三方封装框架，永不报错！
+# 使用官方标准的 Playwright
 from playwright.sync_api import sync_playwright
 
 # 读取环境变量
@@ -13,6 +13,7 @@ TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 HTTP_PROXY = os.getenv("HTTP_PROXY")
 USERS_JSON = os.getenv("USERS_JSON", "").strip()
+SERVER_URL = os.getenv("SERVER_URL", "").strip() # 新增：目标服务器管理页面直达链接
 
 # 初始化截图目录
 SCREENSHOT_DIR = Path("screenshots")
@@ -55,7 +56,6 @@ def get_users():
         
     print(f"收到原始明文长度: {len(USERS_JSON)} 字符")
     
-    # 首先尝试当做标准 JSON 解析
     if USERS_JSON.startswith("[") or USERS_JSON.startswith("{"):
         try:
             parsed = json.loads(USERS_JSON)
@@ -93,24 +93,21 @@ def main():
     print("正在初始化官方 Playwright 隐形浏览器环境...")
     
     with sync_playwright() as p:
-        # 配置内置隐形参数，绕过常规检测
         launch_kwargs = {
-            "headless": False, # xvfb 必须为 False
+            "headless": False, 
             "args": [
-                "--disable-blink-features=AutomationControlled", # 隐藏自动化特征
+                "--disable-blink-features=AutomationControlled", 
                 "--no-sandbox",
                 "--disable-setuid-sandbox"
             ]
         }
         
-        # 如果有代理，传递给官方浏览器核心
         if HTTP_PROXY:
             print(f"[代理] 检测到配置: {HTTP_PROXY}")
             launch_kwargs["proxy"] = {"server": HTTP_PROXY}
             
         browser = p.chromium.launch(**launch_kwargs)
         
-        # 注入标准防爬指纹伪装，替代三方框架
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             viewport={"width": 1280, "height": 720},
@@ -159,13 +156,25 @@ def main():
                     send_telegram_message(f"❌ *登录失败*\n用户: {username}\n原因: 账号或密码错误", str(fail_shot))
                     continue
 
-                print('正在寻找 "See" 链接...')
-                see_link = page.locator('a:has-text("See"), :text("See")')
-                if see_link.count() > 0:
-                    see_link.first.click()
-                    time.sleep(3)
+                # --- 智能跳转判断逻辑 ---
+                jump_success = False
+                if SERVER_URL:
+                    print(f"检测到直达链接配置，正在直接跨过 'See' 按钮跳转至: {SERVER_URL}")
+                    page.goto(SERVER_URL)
+                    time.sleep(4)
+                    jump_success = True
                 else:
-                    print("未找到 \"See\" 按钮，跳过该用户。")
+                    print('未配置直达链接，正在寻找网页 "See" 链接...')
+                    see_link = page.locator('a:has-text("See"), :text("See")')
+                    if see_link.count() > 0:
+                        see_link.first.click()
+                        time.sleep(3)
+                        jump_success = True
+                    else:
+                        print("❌ 未找到 \"See\" 按钮，且未配置 SERVER_URL 变量，跳过该用户。")
+                        continue
+
+                if not jump_success:
                     continue
 
                 # --- 进入 Renew 循环重试机制 ---
@@ -261,7 +270,6 @@ def main():
             except Exception:
                 pass
                 
-        # 流程完毕关闭环境
         context.close()
         browser.close()
 
