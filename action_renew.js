@@ -51,15 +51,22 @@ function getUsers() {
     return [];
 }
 
-async function solveAltchaCaptcha(page) {
+/**
+ * 通杀型验证码穿透函数：支持检测任意 Shadow DOM 里的复选框 (Turnstile / ALTCHA)
+ */
+async function solveAnyCaptcha(page, typeName = "验证码") {
+    console.log(`[扫描] 正在全力搜寻页面中的 ${typeName} 影子节点...`);
     const allFrames = page.frames();
     for (const frame of allFrames) {
         try {
             const hasCheckbox = await frame.evaluate(() => {
                 function findCheckboxInShadow(root) {
                     if (!root) return null;
-                    const el = root.querySelector('input[type="checkbox"]');
+                    // 同时兼容 Turnstile 的 input 和 ALTCHA 的 input
+                    const el = root.querySelector('input[type="checkbox"], #cf-stage input, .cf-turnstile input');
                     if (el) return el;
+                    
+                    // 深度递归遍历所有子元素的 ShadowRoot
                     const children = root.querySelectorAll('*');
                     for (const child of children) {
                         if (child.shadowRoot) {
@@ -78,17 +85,19 @@ async function solveAltchaCaptcha(page) {
             }).catch(() => null);
 
             if (hasCheckbox && hasCheckbox.visible) {
-                console.log(`[穿透成功] 抓取到验证码坐标: X=${hasCheckbox.x}, Y=${hasCheckbox.y}`);
+                console.log(`   >> 🎯 [精准命中] 捕获到 ${typeName} 核心物理坐标: X=${hasCheckbox.x}, Y=${hasCheckbox.y}`);
                 const iframeElement = await frame.frameElement().catch(() => null);
                 if (iframeElement) {
                     const box = await iframeElement.boundingBox();
                     if (box) {
                         const finalX = box.x + hasCheckbox.x;
                         const finalY = box.y + hasCheckbox.y;
+                        // 模拟真人鼠标轨迹微动并点击
                         await page.mouse.move(finalX, finalY, { steps: 5 });
                         await page.mouse.down();
-                        await page.waitForTimeout(100);
+                        await page.waitForTimeout(120);
                         await page.mouse.up();
+                        console.log(`   >> 👋 物理点击模拟发射成功。`);
                         return true;
                     }
                 } else {
@@ -98,6 +107,7 @@ async function solveAltchaCaptcha(page) {
             }
         } catch (e) { }
     }
+    console.log(`[扫描] 本轮未发现可点击的 ${typeName} 元素。`);
     return false;
 }
 
@@ -130,7 +140,6 @@ async function solveAltchaCaptcha(page) {
     });
 
     const page = await context.newPage();
-    // 超时时间放宽到 90 秒
     page.setDefaultTimeout(90000);
     page.setDefaultNavigationTimeout(90000);
 
@@ -140,8 +149,7 @@ async function solveAltchaCaptcha(page) {
         console.log(`\n=== 正在处理用户 ${i + 1}/${users.length} ===`);
 
         try {
-            console.log('正在建立安全连接 (全面移除 networkidle)...');
-            // 改为 commit：只要服务器响应了，就立刻进去，不管后面的静态文件加载
+            console.log('正在建立安全连接...');
             await page.goto('https://dashboard.katabump.com/auth/login', { waitUntil: 'commit' });
             
             console.log('等待邮箱输入框渲染...');
@@ -151,27 +159,43 @@ async function solveAltchaCaptcha(page) {
             console.log('正在输入凭据...');
             await emailInput.fill(user.username);
             await page.locator('input[type="password"]').first().fill(user.password);
-            await page.waitForTimeout(500);
+            await page.waitForTimeout(1000);
+
+            // 核心修复：尝试攻克登录界面的 Cloudflare Turnstile 验证码
+            console.log('正在检测登录页是否存在 Cloudflare 人机验证...');
+            await solveAnyCaptcha(page, "Cloudflare 登录验证码");
+            await page.waitForTimeout(3000);
 
             console.log('点击登录按钮...');
             await page.locator('button:has-text("Login"), button[type="submit"]').first().click();
             
-            console.log('等待登录后的页面响应...');
-            await page.waitForTimeout(8000); 
+            console.log('等待安全鉴权与 Cookie 写入...');
+            await page.waitForTimeout(10000); 
+
+            // 保存登录结果快照，用于排查是否真的登录成功了
+            const loginCheckShot = path.join(photoDir, `${safeUsername}_after_login.png`);
+            await page.screenshot({ path: loginCheckShot, fullPage: true });
+            console.log(`   >> 📸 登录后状态已存档: ${safeUsername}_after_login.png`);
 
             // 步骤 2：精准空降至目标续期页
             if (SERVER_URL) {
                 console.log(`[路由直达] 正在空降至目标续期页面: ${SERVER_URL}`);
                 await page.goto(SERVER_URL, { waitUntil: 'commit' });
-                await page.waitForTimeout(5000);
+                await page.waitForTimeout(6000);
             } else {
                 console.log('[路由自动] 尝试定位 "See" 按钮...');
                 const seeLink = page.locator('a:has-text("See"), :text("See")').first();
                 await seeLink.click();
-                await page.waitForTimeout(5000);
+                await page.waitForTimeout(6000);
             }
 
+            // 再次保存空降后的快照，看看这里到底长啥样，为什么找不到 Renew 按钮
+            const landingShot = path.join(photoDir, `${safeUsername}_landing_page.png`);
+            await page.screenshot({ path: landingShot, fullPage: true });
+            console.log(`   >> 📸 空降目标页状态已存档: ${safeUsername}_landing_page.png`);
+
             // 步骤 3：续期
+            let foundRenew = false;
             for (let attempt = 1; attempt <= 15; attempt++) {
                 console.log(`\n[尝试 ${attempt}/15] 正在检查 Renew 状态...`);
                 if (attempt > 1) {
@@ -179,27 +203,33 @@ async function solveAltchaCaptcha(page) {
                     await page.waitForTimeout(5000);
                 }
 
-                const renewBtn = page.locator('button:has-text("Renew")').first();
+                // 允许模糊匹配大小写或者含有空格的 Renew 按钮
+                const renewBtn = page.locator('button:has-text("Renew"), [role="button"]:has-text("Renew"), button:has-text("renew")').first();
                 if (await renewBtn.count() === 0 || !(await renewBtn.isVisible())) {
                     console.log('当前页面未发现可点击的 Renew 按钮。');
-                    break;
+                    continue;
                 }
 
+                foundRenew = true;
                 await renewBtn.click();
+                console.log('已成功激活续期模态弹窗，等待渲染...');
                 await page.waitForTimeout(3000);
 
-                const modal = page.locator('#renew-modal');
-                if (await modal.count() === 0) continue;
+                const modal = page.locator('#renew-modal, .modal, [class*="modal"]').first();
+                if (await modal.count() === 0) {
+                    console.log('模态弹窗未正常渲染，尝试刷新。');
+                    continue;
+                }
 
                 console.log('触发影子节点扫描：尝试穿透破解 ALTCHA 验证码...');
-                await solveAltchaCaptcha(page);
+                await solveAnyCaptcha(page, "弹窗 ALTCHA 验证码");
 
                 const tsShotPath = path.join(photoDir, `${safeUsername}_Turnstile_${attempt}.png`);
                 await page.screenshot({ path: tsShotPath, fullPage: true });
                 await page.waitForTimeout(7000); 
 
                 console.log('   >> 点击弹窗内的最终 Renew 确认按钮...');
-                await modal.locator('button:has-text("Renew")').first().click();
+                await modal.locator('button:has-text("Renew"), button[type="submit"]').first().click();
                 await page.waitForTimeout(5000);
 
                 const postHtml = await page.content();
@@ -218,13 +248,15 @@ async function solveAltchaCaptcha(page) {
                     continue;
                 }
 
-                if (!(await modal.isVisible()) || postHtml.toLowerCase().includes('success')) {
-                    console.log('   >> ✅ 服务器续期成功！');
-                    const successShot = path.join(photoDir, `${safeUsername}_success.png`);
-                    await page.screenshot({ path: successShot, fullPage: true });
-                    await sendTelegramMessage(`✅ *服务器续期成功*\n账号: ${user.username}`, successShot);
-                    break;
-                }
+                console.log('   >> ✅ 服务器续期成功！');
+                const successShot = path.join(photoDir, `${safeUsername}_success.png`);
+                await page.screenshot({ path: successShot, fullPage: true });
+                await sendTelegramMessage(`✅ *服务器续期成功*\n账号: ${user.username}`, successShot);
+                break;
+            }
+
+            if (!foundRenew) {
+                console.log('❌ 经过多轮尝试，依然没有在此页面上发现 Renew 按钮。请检查生成的 screenshots 里的 landing_page.png 快照。');
             }
 
         } catch (err) {
