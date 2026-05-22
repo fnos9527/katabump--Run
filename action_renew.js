@@ -81,12 +81,12 @@ async function solveAnyCaptcha(page, typeName = "验证码") {
                     if (box) {
                         const finalX = box.x + hasCheckbox.x;
                         const finalY = box.y + hasCheckbox.y;
-                        console.log(`   >> 🎯 [瞄准目标] 正在向 ${typeName} 发射微动物理点击: (${Math.round(finalX)}, ${Math.round(finalY)})`);
-                        await page.mouse.move(finalX - 10, finalY - 5);
+                        console.log(`   >> 🎯 [瞄准目标] 正在向 ${typeName} 发射物理点击: (${Math.round(finalX)}, ${Math.round(finalY)})`);
+                        await page.mouse.move(finalX - 5, finalY - 5);
                         await page.waitForTimeout(100);
-                        await page.mouse.move(finalX, finalY, { steps: 6 });
+                        await page.mouse.move(finalX, finalY, { steps: 5 });
                         await page.mouse.down();
-                        await page.waitForTimeout(180);
+                        await page.waitForTimeout(150);
                         await page.mouse.up();
                         return true;
                     }
@@ -133,55 +133,50 @@ async function solveAnyCaptcha(page, typeName = "验证码") {
         try {
             console.log('正在建立安全连接...');
             await page.goto('https://dashboard.katabump.com/auth/login', { waitUntil: 'domcontentloaded' });
-            
-            console.log('【第一阶段】正在循环探测并瓦解开局 Cloudflare 拦截盾...');
-            let cfPassed = false;
-            for (let clickLoop = 1; clickLoop <= 5; clickLoop++) {
-                const clicked = await solveAnyCaptcha(page, "开局 Cloudflare 验证码");
-                if (clicked) {
-                    await page.waitForTimeout(4000);
-                }
-
-                const isFormReady = await page.evaluate(() => {
-                    const mailInput = document.querySelector('input[type="email"], input[name="email"]');
-                    if (!mailInput) return false;
-                    const rect = mailInput.getBoundingClientRect();
-                    return rect.width > 0 && rect.height > 0;
-                });
-
-                if (isFormReady) {
-                    console.log('   >> 🎉 成功穿透初始拦截！登录表单已显现。');
-                    cfPassed = true;
-                    break;
-                }
-                await page.waitForTimeout(1500);
-            }
-
-            await page.screenshot({ path: path.join(photoDir, `${safeUsername}_盾后状态.png`), fullPage: true });
+            await page.waitForTimeout(3000);
 
             console.log('正在定位表单输入框...');
             const emailInput = page.locator('input[type="email"], input[name="email"]').first();
             const passwordInput = page.locator('input[type="password"]').first();
+            await emailInput.waitFor({ state: 'visible', timeout: 20000 });
 
             console.log('正在录入账号与密码凭据...');
             await emailInput.focus();
-            await emailInput.fill(user.username, { delay: 50 });
-            await page.waitForTimeout(3000); // 适度拉开时序延迟
-            await passwordInput.focus();
-            await passwordInput.fill(user.password, { delay: 50 });
+            await emailInput.fill(user.username, { delay: 60 });
             await page.waitForTimeout(1000);
+            await passwordInput.focus();
+            await passwordInput.fill(user.password, { delay: 60 });
+            await page.waitForTimeout(2000);
 
-            // 🌟 【终极拦截点修复】：输入表单完毕后，重新核验并二次攻坚可能被重置的 Turnstile 占位框
-            console.log('【第二阶段】正在对临门一脚的 Cloudflare Token 进行二次激活与校验...');
-            for (let retryClick = 1; retryClick <= 3; retryClick++) {
-                const reClicked = await solveAnyCaptcha(page, "临门一脚二次验证码");
-                if (reClicked) {
-                    console.log('   >> 🔒 二次物理激活信号已下发，静候安全响应...');
-                    await page.waitForTimeout(4000);
-                } else {
+            console.log('【独家特训】开始攻坚 Cloudflare 登录验证盾...');
+            let passed = false;
+            for (let clickLoop = 1; clickLoop <= 5; clickLoop++) {
+                console.log(`   -> [尝试第 ${clickLoop}/5 次点击验证框]`);
+                const clicked = await solveAnyCaptcha(page, "Cloudflare 登录验证码");
+                
+                // 给验证码响应和打绿勾的时间
+                await page.waitForTimeout(5000);
+
+                // 保存现场快照看看勾上没有
+                await page.screenshot({ path: path.join(photoDir, `${safeUsername}_盾后状态.png`), fullPage: true });
+
+                // 检查隐藏的 cf-turnstile-response 的值是不是已经被注入进去了（代表 CF 真正放行）
+                const hasToken = await page.evaluate(() => {
+                    const el = document.querySelector('[name="cf-turnstile-response"], [name="g-recaptcha-response"]');
+                    return el && el.value && el.value.length > 10;
+                });
+
+                if (hasToken) {
+                    console.log('   >> 🎉 [大获全胜] 检测到加密 Token 已成功写入底层表单！');
+                    passed = true;
                     break;
                 }
+                console.log('   >> ⏳ Token 尚未就绪，准备进行增量补点击...');
             }
+
+            // 🌟 核心防踩坑：即使勾上了，也原地稳稳死等 3.5 秒，让网站底层把参数全部咬合完毕
+            console.log('沉淀安全态势：原地静止 3.5 秒以确保 Token 固化...');
+            await page.waitForTimeout(3500);
 
             console.log('发出最终登录请求（点击 Login）...');
             await page.locator('button:has-text("Login"), button[type="submit"]').first().click();
@@ -192,13 +187,14 @@ async function solveAnyCaptcha(page, typeName = "验证码") {
             // 路由直达控制台
             if (SERVER_URL) {
                 console.log(`[路由直达] 正在全速空降至目标续期页面: ${SERVER_URL}`);
-                await page.goto(SERVER_URL, { waitUntil: 'commit' });
-                await page.waitForTimeout(6000);
+                await page.goto(SERVER_URL, { waitUntil: 'domcontentloaded' });
+                // 空降过去后多等一会儿，防止页面是白屏骨架
+                await page.waitForTimeout(8000);
             } else {
                 console.log('[路由自动] 正在寻找控制台入口...');
                 const seeLink = page.locator('a:has-text("See"), :text("See")').first();
                 await seeLink.click();
-                await page.waitForTimeout(6000);
+                await page.waitForTimeout(8000);
             }
 
             // 续期模块（最多重试 3 次）
@@ -206,7 +202,7 @@ async function solveAnyCaptcha(page, typeName = "验证码") {
             for (let attempt = 1; attempt <= 3; attempt++) {
                 console.log(`\n[尝试 ${attempt}/3] 正在检查 Renew 状态...`);
                 if (attempt > 1) {
-                    await page.reload({ waitUntil: 'commit' });
+                    await page.reload({ waitUntil: 'domcontentloaded' });
                     await page.waitForTimeout(5000);
                 }
 
@@ -238,9 +234,7 @@ async function solveAnyCaptcha(page, typeName = "验证码") {
 
                 const postHtml = await page.content();
                 if (postHtml.includes("can't renew your server yet") || postHtml.includes("You can't renew")) {
-                    const match = postHtml.match(/as of\s+(.*?)\s+\(/);
-                    const dateStr = match ? match[1] : '尚未到期';
-                    console.log(`   >> ⏳ 续期条件未满足。下次可用时间: ${dateStr}`);
+                    console.log('   >> ⏳ 续期条件未满足：当前服务器尚不需要续期。');
                     break;
                 }
 
@@ -257,7 +251,7 @@ async function solveAnyCaptcha(page, typeName = "验证码") {
             }
 
             if (!foundRenew) {
-                console.log('❌ 3次尝试后依然未能进入包含 Renew 按钮的控制台页面，请排查盾后状态。');
+                console.log('❌ 3次尝试后依然未能成功触发 Renew 续期流程。');
             }
 
         } catch (err) {
