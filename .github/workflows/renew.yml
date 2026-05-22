@@ -24,8 +24,8 @@ jobs:
         sudo apt-get install -y xvfb curl
         python -m pip install --upgrade pip
         
-        # 强制直接安装所有必需的依赖包，彻底绕过 click 和浏览器环境缺失问题
-        pip install scrapling requests click playwright camoufox
+        # 强制安装所有可能缺失的底层指纹库（补上了 curl_cffi）
+        pip install scrapling requests click playwright camoufox curl_cffi
         
         # 初始化并安装 Scrapling 的隐形浏览器内核
         scrapling install
