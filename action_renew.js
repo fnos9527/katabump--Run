@@ -12,6 +12,20 @@ const TG_CHAT_ID = process.env.TG_CHAT_ID;
 const SERVER_URL = process.env.SERVER_URL ? process.env.SERVER_URL.trim() : '';
 const HTTP_PROXY = process.env.HTTP_PROXY;
 
+const SCREENSHOT_DIR = path.join(__dirname, 'screenshots');
+if (!fs.existsSync(SCREENSHOT_DIR)) fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
+
+// 截图小工具：任何时候都不应该让截图失败影响主流程
+async function snap(page, label) {
+    try {
+        const file = path.join(SCREENSHOT_DIR, `${Date.now()}_${label}.png`);
+        await page.screenshot({ path: file, fullPage: true });
+        console.log(`📸 已保存截图: ${label}`);
+    } catch (e) {
+        console.error(`⚠️ 截图失败 (${label}):`, e.message);
+    }
+}
+
 function getUsers() {
     const raw = process.env.USERS_JSON || '';
     if (!raw) return [];
@@ -72,9 +86,11 @@ function getUsers() {
             // 2. 登录流程（已修正域名为 katabump.com）
             console.log(`=== 处理用户: ${user.username} ===`);
             await page.goto('https://dashboard.katabump.com/auth/login', { waitUntil: 'domcontentloaded' });
+            await snap(page, `${user.username}_01_login_page`);
 
             await page.locator('input[type="email"]').fill(user.username);
             await page.locator('input[type="password"]').fill(user.password);
+            await snap(page, `${user.username}_02_filled_form`);
 
             console.log(">> 等待 Token 就绪...");
             for (let i = 0; i < 10; i++) {
@@ -82,12 +98,17 @@ function getUsers() {
                 if (hasToken) break;
                 await page.waitForTimeout(2000);
             }
+            await snap(page, `${user.username}_03_after_token_wait`);
 
             await page.locator('button[type="submit"]').click();
             await page.waitForTimeout(8000);
+            await snap(page, `${user.username}_04_after_submit`);
 
             // 3. 续期流程
-            if (SERVER_URL) await page.goto(SERVER_URL, { waitUntil: 'domcontentloaded' });
+            if (SERVER_URL) {
+                await page.goto(SERVER_URL, { waitUntil: 'domcontentloaded' });
+                await snap(page, `${user.username}_05_server_page`);
+            }
 
             let success = false;
             for (let attempt = 1; attempt <= 3; attempt++) {
@@ -98,8 +119,10 @@ function getUsers() {
                     const confirmBtn = page.locator('button:has-text("Confirm"), button:has-text("Renew")').last();
                     if (await confirmBtn.isVisible()) await confirmBtn.click();
                     success = true;
+                    await snap(page, `${user.username}_06_renew_clicked`);
                     break;
                 }
+                await snap(page, `${user.username}_06_attempt${attempt}_no_button`);
                 await page.reload();
                 await page.waitForTimeout(5000);
             }
@@ -108,6 +131,7 @@ function getUsers() {
         } catch (err) {
             // 修复点: 单个用户处理失败不影响后续用户，记录日志后继续下一个
             console.error(`❌ 处理用户 ${user.username} 时出错:`, err.message);
+            if (page && !page.isClosed()) await snap(page, `${user.username}_ERROR`);
         } finally {
             if (page && !page.isClosed()) await page.close().catch(() => {});
         }
