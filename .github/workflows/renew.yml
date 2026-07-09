@@ -34,7 +34,9 @@ jobs:
         HTTP_PROXY_RAW: ${{ secrets.HTTP_PROXY }}
       run: |
         echo "正在下载并安装 Xray-core..."
-        curl -L -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+        # 修复点1: 锁定为已验证可用的稳定版本，不再使用 latest，
+        # 避免官方发布破坏性更新（如本次移除 allowInsecure）导致工作流突然失败。
+        curl -L -o xray.zip https://github.com/XTLS/Xray-core/releases/download/v25.9.11/Xray-linux-64.zip
         unzip -q xray.zip -d xray-bin
         chmod +x ./xray-bin/xray
         
@@ -83,7 +85,6 @@ jobs:
                   "network": "ws",
                   "security": "tls",
                   "tlsSettings": {
-                    "allowInsecure": true,
                     "serverName": sni
                   },
                   "wsSettings": {
@@ -114,6 +115,20 @@ jobs:
         
         echo "=== 尝试打印 Xray 运行日志 (排查异常) ==="
         cat xray.log || true
+
+        echo "=== 校验代理是否真正可用 (关键防呆) ==="
+        # 修复点2: 增加代理连通性自检，如果 Xray 没有正常监听或代理不可用，
+        # 直接让工作流在这一步失败并给出明确提示，而不是让后面的 Playwright
+        # 报出难以理解的 ERR_PROXY_CONNECTION_FAILED。
+        if ! ss -lntp | grep -q 10808; then
+          echo "❌ Xray 未能监听 10808 端口，代理未启动成功，终止工作流。"
+          exit 1
+        fi
+        if ! curl -s --max-time 10 -x socks5://127.0.0.1:10808 -o /dev/null -w "%{http_code}" https://www.google.com | grep -q "200\|301\|302"; then
+          echo "❌ 代理无法正常访问外网，请检查 HTTP_PROXY 密钥中的 VLESS 节点是否有效。"
+          exit 1
+        fi
+        echo "✅ 代理连通性检测通过！"
 
     - name: Run Renew Script
       env:
