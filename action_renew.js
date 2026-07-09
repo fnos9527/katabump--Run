@@ -461,7 +461,7 @@ async function clickBtnByText(page, text) {
                         `📅 续期后到期日: <code>${expiryAfter}</code>\n` +
                         `⏳ 延长天数: <b>${diffDays}</b> 天`;
             } else if (warningMsg) {
-                tgMsg = `⚠️ <b>Katabump 暂无法续期</b>\n` +
+                tgMsg = `⚠️ <b>Katabump 未到续期</b>\n` +
                         `👤 用户: <code>${user.username}</code>\n` +
                         `📅 当前到期日: <code>${expiryBefore || "未知"}</code>\n` +
                         `🔴 页面提示: <i>${warningMsg}</i>`;
