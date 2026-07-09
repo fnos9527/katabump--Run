@@ -68,7 +68,6 @@ async function sendTGMessage(msg) {
 // 提取页面上的 Expiry (到期时间)
 async function getExpiryDate(page) {
     return await page.evaluate(() => {
-        // 1. 尝试遍历所有元素寻找 Expiry 并获取其右侧日期
         const allElements = Array.from(document.querySelectorAll('*'));
         for (let el of allElements) {
             if (el.children.length === 0 && el.textContent.trim() === 'Expiry') {
@@ -91,7 +90,6 @@ async function getExpiryDate(page) {
                 }
             }
         }
-        // 2. 全局正则匹配备用方案
         const bodyText = document.body.innerText;
         const match = bodyText.match(/Expiry\s+([0-9]{4}-[0-9]{2}-[0-9]{2})/i) || bodyText.match(/Expiry\s*:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})/i);
         if (match) return match[1];
@@ -115,7 +113,6 @@ async function getWarningMessage(page) {
                 }
             }
         }
-        // 备用：匹配特定提示句式
         const divs = Array.from(document.querySelectorAll('div, p, span'));
         for (let d of divs) {
             const txt = d.textContent.trim();
@@ -276,7 +273,7 @@ async function clickBtnByText(page, text) {
             // 2. 获取续期前参数
             if (SERVER_URL) {
                 await page.goto(SERVER_URL, { waitUntil: 'domcontentloaded' });
-                await delay(3000); // 等待服务器数据渲染
+                await delay(3000); 
                 await snap(page, `${user.username}_05_server_page`);
             }
 
@@ -290,22 +287,87 @@ async function clickBtnByText(page, text) {
             if (await isBtnVisibleByText(page, "Renew")) {
                 console.log(">> 找到主页面 Renew 按钮，开始点击打开弹窗...");
                 await clickBtnByText(page, "Renew");
-                await delay(3000); // 等待弹窗和验证码资源加载
+                await delay(1000); // 预留短暂动画时间
                 await snap(page, `${user.username}_06_modal_opened`);
 
-                console.log(">> 穿透 Shadow DOM 并尝试勾选 ALTCHA 'I'm not a robot' 框...");
-                const clickedAltcha = await page.evaluate(() => {
-                    const widget = document.querySelector('altcha-widget');
-                    if (widget && widget.shadowRoot) {
-                        const checkbox = widget.shadowRoot.querySelector('input[type="checkbox"]');
-                        if (checkbox) {
-                            checkbox.click();
-                            return "shadow_checkbox_clicked";
-                        }
+                console.log(">> 正在寻找 ALTCHA 验证框并尝试进行安全点击...");
+                let altchaClicked = false;
+
+                // 物理防御 1：动态等待原生 Shadow DOM 穿透选择器检测到复选框并点击
+                try {
+                    const checkbox = await page.waitForSelector('altcha-widget >>> input[type="checkbox"]', { timeout: 4000 });
+                    if (checkbox) {
+                        await checkbox.click();
+                        console.log("✅ 原生 Shadow DOM 选择器点击成功！");
+                        altchaClicked = true;
                     }
-                    return "not_found";
-                });
-                console.log(`>> ALTCHA 点击操作结果: ${clickedAltcha}`);
+                } catch (e) {
+                    console.log("⚠️ 穿透选择器超时，准备尝试 JS 深度穿透...");
+                }
+
+                // 物理防御 2：JS 深度递归遍历 Shadow Tree 节点查找 input 进行点击
+                if (!altchaClicked) {
+                    try {
+                        const clicked = await page.evaluate(() => {
+                            const widget = document.querySelector('altcha-widget');
+                            if (widget) {
+                                const findCheckbox = (root) => {
+                                    if (!root) return null;
+                                    const el = root.querySelector('input[type="checkbox"]');
+                                    if (el) return el;
+                                    const all = Array.from(root.querySelectorAll('*'));
+                                    for (let child of all) {
+                                        if (child.shadowRoot) {
+                                            const found = findCheckbox(child.shadowRoot);
+                                            if (found) return found;
+                                        }
+                                    }
+                                    return null;
+                                };
+                                let checkbox = widget.shadowRoot ? widget.shadowRoot.querySelector('input[type="checkbox"]') : null;
+                                if (!checkbox) {
+                                    checkbox = findCheckbox(widget);
+                                }
+                                if (checkbox) {
+                                    checkbox.click();
+                                    return "js_shadow_clicked";
+                                }
+                                const container = widget.shadowRoot ? widget.shadowRoot.querySelector('.altcha-checkbox') : null;
+                                if (container) {
+                                    container.click();
+                                    return "js_container_clicked";
+                                }
+                            }
+                            return "not_found";
+                        });
+                        if (clicked !== "not_found") {
+                            console.log(`✅ JS 深度穿透点击成功 (${clicked})！`);
+                            altchaClicked = true;
+                        }
+                    } catch (e) {
+                        console.log("⚠️ JS 深度穿透失败，尝试物理坐标直接点击...");
+                    }
+                }
+
+                // 物理防御 3：屏幕坐标兜底。获取 altcha-widget 的 bounding box，往其 Checkbox 的视觉中心位置无缝点击
+                if (!altchaClicked) {
+                    try {
+                        const widget = await page.$('altcha-widget');
+                        if (widget) {
+                            const box = await widget.boundingBox();
+                            if (box) {
+                                const clickX = box.x + 30; // Checkbox 在验证框左边 30px
+                                const clickY = box.y + (box.height / 2); // 垂直居中
+                                await page.mouse.click(clickX, clickY);
+                                console.log(`✅ 兜底物理坐标点击成功！坐标: (${clickX}, ${clickY})`);
+                                altchaClicked = true;
+                            }
+                        }
+                    } catch (e) {
+                        console.error("❌ 坐标点击操作异常:", e.message);
+                    }
+                }
+
                 await snap(page, `${user.username}_07_altcha_clicked`);
 
                 // 轮询等待 ALTCHA 计算完成 (PoW 机制)
