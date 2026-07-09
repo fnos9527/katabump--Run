@@ -71,19 +71,19 @@ async function clickBtnByText(page, text) {
 
     // 1. 配置浏览器连接参数
     const connectOptions = { 
-        headless: false, // 必须为 false 才能在虚拟桌面中完美渲染、过盾并执行自动点击
+        headless: false, 
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage', // 防止 CI 容器共享内存耗尽导致崩溃
+            '--disable-dev-shm-usage', 
             '--window-size=1280,720'
         ],
         customConfig: {},
-        turnstile: true, // 核心：开启内置的 Cloudflare Turnstile 自动识别和对准点击功能
+        turnstile: true, 
         connectOption: {
             defaultViewport: { width: 1280, height: 720 }
         },
-        disableXvfb: true, // 禁用插件内置的 Xvfb。我们通过 Actions 外部的 xvfb-run 管理，防止冲突
+        disableXvfb: true, 
         ignoreAllFlags: false
     };
 
@@ -95,7 +95,6 @@ async function clickBtnByText(page, text) {
                 host: proxyUrl.hostname,
                 port: parseInt(proxyUrl.port)
             };
-            // 额外通过 chrome flags 注入 socks5 协议以确保连通性
             connectOptions.args.push(`--proxy-server=socks5://${proxyUrl.hostname}:${proxyUrl.port}`);
             console.log(`📡 代理已配置为: socks5://${proxyUrl.hostname}:${proxyUrl.port}`);
         } catch (e) {
@@ -127,7 +126,6 @@ async function clickBtnByText(page, text) {
                 page = await browser.newPage();
             }
 
-            // 设置视口大小以确保截图范围一致
             await page.setViewport({ width: 1280, height: 720 }).catch(() => {});
 
             // 4. 登录流程
@@ -139,22 +137,42 @@ async function clickBtnByText(page, text) {
             await page.waitForSelector('input[type="email"]', { timeout: 15000 });
             await page.waitForSelector('input[type="password"]', { timeout: 15000 });
 
-            // 清理输入框，防止残留
-            await page.evaluate(() => {
-                document.querySelector('input[type="email"]').value = '';
-                document.querySelector('input[type="password"]').value = '';
-            });
+            // 清理并重新聚焦输入框后键入
+            await page.focus('input[type="email"]');
+            await page.evaluate(() => document.querySelector('input[type="email"]').value = '');
+            await page.type('input[type="email"]', user.username, { delay: 100 });
 
-            // 模拟人类延迟键入
-            await page.type('input[type="email"]', user.username, { delay: 50 });
-            await page.type('input[type="password"]', user.password, { delay: 50 });
+            await page.focus('input[type="password"]');
+            await page.evaluate(() => document.querySelector('input[type="password"]').value = '');
+            await page.type('input[type="password"]', user.password, { delay: 100 });
+
+            // 【防丢字机制】：校验实际输入值是否与目标账号一致
+            const checkedEmail = await page.$eval('input[type="email"]', el => el.value);
+            const checkedPassword = await page.$eval('input[type="password"]', el => el.value);
+
+            if (checkedEmail !== user.username || checkedPassword !== user.password) {
+                console.log("⚠️ 检测到模拟输入丢失字符，正在进行强制修正...");
+                await page.evaluate((u, p) => {
+                    const emailEl = document.querySelector('input[type="email"]');
+                    const passEl = document.querySelector('input[type="password"]');
+                    
+                    emailEl.value = u;
+                    // 手动分发输入和变更事件，确保表单组件能正确监听到最新状态值
+                    emailEl.dispatchEvent(new Event('input', { bubbles: true }));
+                    emailEl.dispatchEvent(new Event('change', { bubbles: true }));
+                    
+                    passEl.value = p;
+                    passEl.dispatchEvent(new Event('input', { bubbles: true }));
+                    passEl.dispatchEvent(new Event('change', { bubbles: true }));
+                }, user.username, user.password);
+            }
+
             await snap(page, `${user.username}_02_filled_form`);
 
             // 5. 等待验证通过与 Token 生成
             console.log(">> 等待 Cloudflare 自动检测 & Token 就绪...");
             let isVerified = false;
             for (let i = 0; i < 15; i++) {
-                // 轮询验证码容器，检查 cf-turnstile-response 的 Token 长度是否就绪
                 const hasToken = await page.evaluate(() => {
                     const el = document.querySelector('[name="cf-turnstile-response"]');
                     return el && el.value && el.value.length > 20;
@@ -176,7 +194,7 @@ async function clickBtnByText(page, text) {
 
             // 提交表单
             await page.click('button[type="submit"]');
-            await delay(8000); // 等待页面重定向和鉴权加载完成
+            await delay(8000); 
             await snap(page, `${user.username}_04_after_submit`);
 
             // 6. 续期流程
@@ -191,7 +209,6 @@ async function clickBtnByText(page, text) {
                     await clickBtnByText(page, "Renew");
                     await delay(3000);
                     
-                    // 确认可能弹出的二次确认框
                     if (await isBtnVisibleByText(page, "Confirm")) {
                         await clickBtnByText(page, "Confirm");
                     } else if (await isBtnVisibleByText(page, "Renew")) {
