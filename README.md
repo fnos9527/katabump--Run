@@ -4,7 +4,7 @@ SERVER_URL     =See链接
 HTTP_PROXY   =VLESS 格式
 
 
-vless:// 链接.改为读取 URL 里的 type 参数（默认 tcp），根据值分别生成 wsSettings / tcpSettings / grpcSettings / httpSettings。   
+vless:// 链接.改为读取 URL 里的 type 参数（默认 tcp），根据值分别生成 wsSettings / tcpSettings / grpcSettings / httpSettings兼容多种格式。   
 增加 fp（TLS 指纹）和 insecure/allowInsecure 的兼容处理，两种参数名都认，值为 1 或 true 都算跳过证书校验    
 sni 缺失时自动兜底为 host 参数或服务器地址本身，避免有些节点没写 sni 导致握手失败。   
 uuid 做了 decodeURIComponent，防止用户名部分被编码；       
