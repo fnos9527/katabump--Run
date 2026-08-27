@@ -287,142 +287,72 @@ async function clickBtnByText(page, text) {
             if (await isBtnVisibleByText(page, "Renew")) {
                 console.log(">> 找到主页面 Renew 按钮，开始点击打开弹窗...");
                 await clickBtnByText(page, "Renew");
-                await delay(1000); // 预留短暂动画时间
+                await delay(2000); // 预留稍微长一点的动画时间，确保弹窗完全出现
                 await snap(page, `${user.username}_06_modal_opened`);
 
-                console.log(">> 正在寻找 ALTCHA 验证框并尝试进行安全点击...");
-                let altchaClicked = false;
-
-                // 物理防御 1：动态等待原生 Shadow DOM 穿透选择器检测到复选框并点击
-                try {
-                    const checkbox = await page.waitForSelector('altcha-widget >>> input[type="checkbox"]', { timeout: 4000 });
-                    if (checkbox) {
-                        await checkbox.click();
-                        console.log("✅ 原生 Shadow DOM 选择器点击成功！");
-                        altchaClicked = true;
-                    }
-                } catch (e) {
-                    console.log("⚠️ 穿透选择器超时，准备尝试 JS 深度穿透...");
-                }
-
-                // 物理防御 2：JS 深度递归遍历 Shadow Tree 节点查找 input 进行点击
-                if (!altchaClicked) {
-                    try {
-                        const clicked = await page.evaluate(() => {
-                            const widget = document.querySelector('altcha-widget');
-                            if (widget) {
-                                const findCheckbox = (root) => {
-                                    if (!root) return null;
-                                    const el = root.querySelector('input[type="checkbox"]');
-                                    if (el) return el;
-                                    const all = Array.from(root.querySelectorAll('*'));
-                                    for (let child of all) {
-                                        if (child.shadowRoot) {
-                                            const found = findCheckbox(child.shadowRoot);
-                                            if (found) return found;
-                                        }
-                                    }
-                                    return null;
-                                };
-                                let checkbox = widget.shadowRoot ? widget.shadowRoot.querySelector('input[type="checkbox"]') : null;
-                                if (!checkbox) {
-                                    checkbox = findCheckbox(widget);
-                                }
-                                if (checkbox) {
-                                    checkbox.click();
-                                    return "js_shadow_clicked";
-                                }
-                                const container = widget.shadowRoot ? widget.shadowRoot.querySelector('.altcha-checkbox') : null;
-                                if (container) {
-                                    container.click();
-                                    return "js_container_clicked";
-                                }
-                            }
-                            return "not_found";
-                        });
-                        if (clicked !== "not_found") {
-                            console.log(`✅ JS 深度穿透点击成功 (${clicked})！`);
-                            altchaClicked = true;
-                        }
-                    } catch (e) {
-                        console.log("⚠️ JS 深度穿透失败，尝试物理坐标直接点击...");
+                console.log(">> 正在寻找弹窗中的 Renew 确认按钮...");
+                
+                // 遍历所有 button，精准找寻弹窗里那个肉眼可见的 'Renew'
+                const btnHandles = await page.$$('button');
+                let targetRenewBtn = null;
+                for (let handle of btnHandles) {
+                    const text = await page.evaluate(el => el.textContent.trim(), handle);
+                    const isVisible = await page.evaluate(el => el.offsetParent !== null, handle);
+                    if (text === 'Renew' && isVisible) {
+                        targetRenewBtn = handle; // 不断覆盖，最终拿到 DOM 树里最后面一个（即弹窗里的）
                     }
                 }
 
-                // 物理防御 3：屏幕坐标兜底。获取 altcha-widget 的 bounding box，往其 Checkbox 的视觉中心位置无缝点击
-                if (!altchaClicked) {
-                    try {
-                        const widget = await page.$('altcha-widget');
-                        if (widget) {
-                            const box = await widget.boundingBox();
-                            if (box) {
-                                const clickX = box.x + 30; // Checkbox 在验证框左边 30px
-                                const clickY = box.y + (box.height / 2); // 垂直居中
-                                await page.mouse.click(clickX, clickY);
-                                console.log(`✅ 兜底物理坐标点击成功！坐标: (${clickX}, ${clickY})`);
-                                altchaClicked = true;
-                            }
-                        }
-                    } catch (e) {
-                        console.error("❌ 坐标点击操作异常:", e.message);
-                    }
+                if (targetRenewBtn) {
+                    // 使用 Puppeteer 的原生物理点击，触发 Vue/React 的正常事件流
+                    await targetRenewBtn.click();
+                    console.log("✅ 成功物理点击弹窗中的 Renew 按钮，启动正常验证与提交流！");
+                } else {
+                    console.log("⚠️ 未能找到弹窗中的 Renew 按钮");
                 }
 
-                await snap(page, `${user.username}_07_altcha_clicked`);
+                await delay(1000);
+                await snap(page, `${user.username}_07_start_verifying`);
 
-                // 轮询等待 ALTCHA 计算完成 (PoW 机制)
-                console.log(">> 等待 ALTCHA PoW 计算验证通过...");
+                // 轮询等待 ALTCHA 计算完成并自动提交 (最长等待 90 秒)
+                console.log(">> 等待 PoW 算力验证完成与后端提交 (最大等待 90 秒)...");
                 let altchaPassed = false;
-                for (let i = 0; i < 15; i++) {
-                    const state = await page.evaluate(() => {
-                        const widget = document.querySelector('altcha-widget');
-                        if (widget) {
-                            const stateAttr = widget.getAttribute('state') || widget.getAttribute('data-state');
-                            if (stateAttr === 'verified' || stateAttr === 'solved' || stateAttr === 'success') {
-                                return "verified";
-                            }
-                            if (widget.shadowRoot) {
-                                const checkbox = widget.shadowRoot.querySelector('input[type="checkbox"]');
-                                if (checkbox && checkbox.checked) {
-                                    return "verified";
-                                }
-                            }
-                        }
-                        return "solving";
+                
+                for (let i = 0; i < 90; i++) {
+                    const status = await page.evaluate(() => {
+                        const bodyText = document.body.innerText;
+                        
+                        // 还在验证中
+                        if (bodyText.includes('Verifying...')) return 'verifying';
+                        
+                        // 弹窗特有文字还在，说明可能卡住了或者还没点
+                        if (bodyText.includes('This will extend the life of your server')) return 'open';
+                        
+                        // 特征文字消失，说明弹窗已经关闭，续期提交完成
+                        return 'closed';
                     });
 
-                    if (state === "verified") {
-                        console.log("✅ ALTCHA 验证计算完成！");
+                    if (status === 'closed') {
+                        console.log(`✅ 验证框已消失 (耗时约 ${i} 秒)，续期请求成功提交！`);
                         altchaPassed = true;
                         break;
                     }
+                    
+                    // 每 10 秒打印一次进度，缓解等待焦虑
+                    if (i > 0 && i % 10 === 0) {
+                        console.log(`... 算力验证仍在进行中 (${i} 秒)`);
+                    }
+                    
                     await delay(1000);
                 }
 
                 if (!altchaPassed) {
-                    console.log("⚠️ ALTCHA 在 15 秒内未自动完成，强行尝试点击弹窗提交...");
+                    console.log("⚠️ 90秒内弹窗未自动关闭，可能卡在 100% 或网络请求被拦截。");
+                    await snap(page, `${user.username}_07_5_timeout_stuck`);
                 }
 
-                // 点击弹窗中的 Renew 按钮
-                console.log(">> 尝试点击弹窗中的 Renew 确认提交...");
-                const clickedModalBtn = await page.evaluate(() => {
-                    const dialogs = Array.from(document.querySelectorAll('[role="dialog"], .modal, .popup, div'));
-                    for (let dialog of dialogs) {
-                        if (dialog.querySelector('altcha-widget')) {
-                            const buttons = Array.from(dialog.querySelectorAll('button'));
-                            const renewBtn = buttons.find(b => b.textContent.trim().includes('Renew'));
-                            if (renewBtn) {
-                                renewBtn.click();
-                                return "modal_renew_clicked";
-                            }
-                        }
-                    }
-                    return "not_found";
-                });
-                console.log(`>> Modal Renew 点击结果: ${clickedModalBtn}`);
-
                 // 等待页面处理并重新载入
-                await delay(5000);
+                await delay(6000);
                 await snap(page, `${user.username}_08_after_renew_submit`);
 
                 // 4. 获取续期后数据与警告信息
