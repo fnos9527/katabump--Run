@@ -213,6 +213,33 @@ async function clickBtnByText(page, text) {
 
             await page.setViewport({ width: 1280, height: 720 }).catch(() => {});
 
+            // 全程监听浏览器控制台报错和页面级 JS 异常，帮助诊断"验证码算完但
+            // 卡住不继续"是不是网站前端脚本自己抛错/被反自动化逻辑拦下了
+            page.on('pageerror', (err) => {
+                console.log(`🧯 页面 JS 异常: ${err.message}`);
+            });
+            page.on('console', (msg) => {
+                const type = msg.type();
+                if (type === 'error' || type === 'warning') {
+                    console.log(`🖥️ 浏览器控制台[${type}]: ${msg.text()}`);
+                }
+            });
+
+            // 自检：探测当前浏览器暴露出的自动化痕迹指纹（供诊断反自动化用）
+            try {
+                const autoFlags = await page.evaluate(() => ({
+                    webdriver: navigator.webdriver,
+                    hasCDC: Object.keys(window).some(k => k.startsWith('cdc_') || k.startsWith('$cdc_')),
+                    languages: navigator.languages,
+                    plugins: navigator.plugins ? navigator.plugins.length : null,
+                    userAgent: navigator.userAgent
+                }));
+                console.log(`🕵️ 自动化痕迹自检: navigator.webdriver=${autoFlags.webdriver}, 存在CDC标记=${autoFlags.hasCDC}, languages=${JSON.stringify(autoFlags.languages)}, plugins数=${autoFlags.plugins}`);
+                console.log(`🕵️ UserAgent: ${autoFlags.userAgent}`);
+            } catch (e) {
+                console.log(`⚠️ 自动化痕迹自检失败: ${e.message}`);
+            }
+
             // 1. 登录流程
             console.log(`=== 处理用户: ${user.username} ===`);
             await page.goto('https://dashboard.katabump.com/auth/login', { waitUntil: 'domcontentloaded' });
@@ -342,17 +369,19 @@ async function clickBtnByText(page, text) {
                 for (let attempt = 1; attempt <= MAX_ATTEMPTS && !renewSubmitted; attempt++) {
                     console.log(`\n----- 第 ${attempt}/${MAX_ATTEMPTS} 次续期尝试 -----`);
 
-                    // 网络诊断：监听与验证相关的请求，方便定位卡住的真正原因
+                    // 网络诊断：这次不再只抓"看起来像验证相关"的 URL，而是把这段时间内
+                    // 所有的 xhr/fetch 请求全部记下来——因为我们需要知道的关键问题是：
+                    // "提交验证答案"这个请求到底有没有发出去过，如果连它的 URL 长什么样都
+                    // 不知道，之前用关键词过滤反而可能把它漏掉了。
                     const netLogs = [];
                     const onRequestFailed = (req) => {
-                        if (/altcha|turnstile|challenge|verify|cloudflare/i.test(req.url())) {
-                            const failure = req.failure();
-                            netLogs.push(`❌ 请求失败: ${req.url()} 原因: ${failure ? failure.errorText : '未知'}`);
-                        }
+                        const failure = req.failure();
+                        netLogs.push(`❌ 请求失败: [${req.resourceType()}] ${req.url()} 原因: ${failure ? failure.errorText : '未知'}`);
                     };
                     const onResponse = (res) => {
-                        if (/altcha|turnstile|challenge|verify/i.test(res.url())) {
-                            netLogs.push(`📶 响应: ${res.status()} ${res.url()}`);
+                        const type = res.request().resourceType();
+                        if (type === 'xhr' || type === 'fetch') {
+                            netLogs.push(`📶 响应: ${res.status()} [${type}] ${res.url()}`);
                         }
                     };
                     page.on('requestfailed', onRequestFailed);
@@ -476,6 +505,35 @@ async function clickBtnByText(page, text) {
 
                     if (!altchaPassed) {
                         console.log(`⚠️ 验证在 35 秒内未通过（最后状态: ${lastBtnState ? `"${lastBtnState.text}" disabled=${lastBtnState.disabled}` : "未知"}）。`);
+
+                        // 深挖 altcha-widget 内部真实状态：它的 value/state 属性，
+                        // 以及 shadow DOM 里有没有藏着的错误提示文字，用来判断到底是
+                        // "算完了但没提交" 还是 "提交了但服务器拒绝了但UI没提示"
+                        try {
+                            const widgetDump = await page.evaluate(() => {
+                                const widget = document.querySelector('altcha-widget');
+                                if (!widget) return null;
+                                const hiddenInput = widget.shadowRoot
+                                    ? widget.shadowRoot.querySelector('input[type="hidden"], input[name="altcha"]')
+                                    : null;
+                                return {
+                                    stateAttr: widget.getAttribute('state') || widget.getAttribute('data-state'),
+                                    hasValue: hiddenInput ? !!hiddenInput.value : null,
+                                    valueLength: hiddenInput && hiddenInput.value ? hiddenInput.value.length : 0,
+                                    shadowText: widget.shadowRoot ? widget.shadowRoot.textContent.trim().slice(0, 200) : null,
+                                    outerAttrs: Array.from(widget.attributes).map(a => `${a.name}=${a.value}`).join(' | ')
+                                };
+                            });
+                            if (widgetDump) {
+                                console.log(`🔬 altcha-widget 内部状态: state属性=${widgetDump.stateAttr}, 已生成答案值=${widgetDump.hasValue}(长度${widgetDump.valueLength}), 组件文字="${widgetDump.shadowText}"`);
+                                console.log(`🔬 altcha-widget 所有属性: ${widgetDump.outerAttrs}`);
+                            } else {
+                                console.log("🔬 未在页面上找到 altcha-widget 元素（可能弹窗已变化）。");
+                            }
+                        } catch (e) {
+                            console.log(`⚠️ 读取 altcha-widget 内部状态失败: ${e.message}`);
+                        }
+
                         if (attempt < MAX_ATTEMPTS) {
                             console.log(">> 关闭弹窗，准备重新打开一轮进行重试...");
                             await closeModalIfOpen(page);
