@@ -370,56 +370,97 @@ async function clickBtnByText(page, text) {
 
                 await snap(page, `${user.username}_07_altcha_clicked`);
 
-                // 轮询等待 ALTCHA 计算完成 (PoW 机制)
-                console.log(">> 等待 ALTCHA PoW 计算验证通过...");
-                let altchaPassed = false;
-                for (let i = 0; i < 15; i++) {
-                    const state = await page.evaluate(() => {
-                        const widget = document.querySelector('altcha-widget');
-                        if (widget) {
-                            const stateAttr = widget.getAttribute('state') || widget.getAttribute('data-state');
-                            if (stateAttr === 'verified' || stateAttr === 'solved' || stateAttr === 'success') {
-                                return "verified";
-                            }
-                            if (widget.shadowRoot) {
-                                const checkbox = widget.shadowRoot.querySelector('input[type="checkbox"]');
-                                if (checkbox && checkbox.checked) {
-                                    return "verified";
+                // 辅助函数：读取弹窗内 Renew/Verifying 按钮的当前文字与是否禁用
+                // KataBump 现在把 ALTCHA 的 PoW 进度直接显示在按钮文字上
+                // (例如 "Verifying... 42%")，而不是通过 widget 的 state 属性或
+                // checkbox.checked 来体现，所以旧的检测逻辑永远等不到 "verified"。
+                async function getModalBtnState(page) {
+                    return await page.evaluate(() => {
+                        const dialogs = Array.from(document.querySelectorAll('[role="dialog"], .modal, .popup, div'));
+                        for (let dialog of dialogs) {
+                            if (dialog.querySelector('altcha-widget')) {
+                                const buttons = Array.from(dialog.querySelectorAll('button'));
+                                const btn = buttons.find(b => /renew|verify/i.test(b.textContent));
+                                if (btn) {
+                                    return {
+                                        text: btn.textContent.trim(),
+                                        disabled: btn.disabled || btn.getAttribute('aria-disabled') === 'true'
+                                    };
                                 }
                             }
                         }
-                        return "solving";
+                        return null;
                     });
+                }
 
-                    if (state === "verified") {
-                        console.log("✅ ALTCHA 验证计算完成！");
-                        altchaPassed = true;
-                        break;
+                // 轮询等待 ALTCHA 计算完成 (PoW 机制)，按钮文字重新变回
+                // 纯 "Renew" 且不再 disabled，才算真正验证通过。
+                // 超时时间从 15 秒放宽到 40 秒，给"计算完 100% 后还要等服务器
+                // 校验 token"这一步留出足够时间（这是今天卡住的直接原因）。
+                console.log(">> 等待 ALTCHA PoW 计算验证通过...");
+                let altchaPassed = false;
+                let lastBtnState = null;
+                for (let i = 0; i < 40; i++) {
+                    const state = await getModalBtnState(page);
+                    if (state) {
+                        lastBtnState = state;
+                        if (/^renew$/i.test(state.text) && !state.disabled) {
+                            console.log(`✅ ALTCHA 验证计算完成！按钮已恢复为可点击 "${state.text}"`);
+                            altchaPassed = true;
+                            break;
+                        }
                     }
                     await delay(1000);
                 }
 
                 if (!altchaPassed) {
-                    console.log("⚠️ ALTCHA 在 15 秒内未自动完成，强行尝试点击弹窗提交...");
+                    console.log(`⚠️ ALTCHA 在 40 秒内未恢复为可点击状态（最后状态: ${lastBtnState ? `"${lastBtnState.text}" disabled=${lastBtnState.disabled}` : "未知"}），可能是代理网络延迟导致服务器校验超时。仍尝试点击一次兜底。`);
                 }
 
-                // 点击弹窗中的 Renew 按钮
+                // 点击弹窗中的 Renew 按钮（只点未 disabled 的那个，避免点在
+                // "Verifying... X%" 状态上白点一次）
                 console.log(">> 尝试点击弹窗中的 Renew 确认提交...");
                 const clickedModalBtn = await page.evaluate(() => {
                     const dialogs = Array.from(document.querySelectorAll('[role="dialog"], .modal, .popup, div'));
                     for (let dialog of dialogs) {
                         if (dialog.querySelector('altcha-widget')) {
                             const buttons = Array.from(dialog.querySelectorAll('button'));
-                            const renewBtn = buttons.find(b => b.textContent.trim().includes('Renew'));
+                            const renewBtn = buttons.find(b => b.textContent.trim().includes('Renew') && !b.disabled);
                             if (renewBtn) {
                                 renewBtn.click();
                                 return "modal_renew_clicked";
+                            }
+                            const anyRenewBtn = buttons.find(b => b.textContent.trim().includes('Renew'));
+                            if (anyRenewBtn) {
+                                return "found_but_disabled";
                             }
                         }
                     }
                     return "not_found";
                 });
                 console.log(`>> Modal Renew 点击结果: ${clickedModalBtn}`);
+
+                // 如果按钮还是禁用状态（说明验证确实没通过），再多等 10 秒重试一次点击，
+                // 而不是直接放弃提交
+                if (clickedModalBtn === "found_but_disabled") {
+                    console.log(">> 按钮仍处于禁用状态，再等待 10 秒后重试一次点击...");
+                    await delay(10000);
+                    const retryClick = await page.evaluate(() => {
+                        const dialogs = Array.from(document.querySelectorAll('[role="dialog"], .modal, .popup, div'));
+                        for (let dialog of dialogs) {
+                            if (dialog.querySelector('altcha-widget')) {
+                                const buttons = Array.from(dialog.querySelectorAll('button'));
+                                const renewBtn = buttons.find(b => b.textContent.trim().includes('Renew') && !b.disabled);
+                                if (renewBtn) {
+                                    renewBtn.click();
+                                    return "modal_renew_clicked_retry";
+                                }
+                            }
+                        }
+                        return "still_not_found";
+                    });
+                    console.log(`>> 重试点击结果: ${retryClick}`);
+                }
 
                 // 等待页面处理并重新载入
                 await delay(5000);
