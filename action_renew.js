@@ -287,24 +287,22 @@ async function clickBtnByText(page, text) {
             if (await isBtnVisibleByText(page, "Renew")) {
                 console.log(">> 找到主页面 Renew 按钮，开始点击打开弹窗...");
                 await clickBtnByText(page, "Renew");
-                await delay(2000); // 预留稍微长一点的动画时间，确保弹窗完全出现
+                await delay(2000); 
                 await snap(page, `${user.username}_06_modal_opened`);
 
                 console.log(">> 正在寻找弹窗中的 Renew 确认按钮...");
                 
-                // 遍历所有 button，精准找寻弹窗里那个肉眼可见的 'Renew'
                 const btnHandles = await page.$$('button');
                 let targetRenewBtn = null;
                 for (let handle of btnHandles) {
                     const text = await page.evaluate(el => el.textContent.trim(), handle);
                     const isVisible = await page.evaluate(el => el.offsetParent !== null, handle);
                     if (text === 'Renew' && isVisible) {
-                        targetRenewBtn = handle; // 不断覆盖，最终拿到 DOM 树里最后面一个（即弹窗里的）
+                        targetRenewBtn = handle;
                     }
                 }
 
                 if (targetRenewBtn) {
-                    // 使用 Puppeteer 的原生物理点击，触发 Vue/React 的正常事件流
                     await targetRenewBtn.click();
                     console.log("✅ 成功物理点击弹窗中的 Renew 按钮，启动正常验证与提交流！");
                 } else {
@@ -314,31 +312,37 @@ async function clickBtnByText(page, text) {
                 await delay(1000);
                 await snap(page, `${user.username}_07_start_verifying`);
 
-                // 轮询等待 ALTCHA 计算完成并自动提交 (最长等待 90 秒)
+                // 轮询等待 ALTCHA 计算完成并自动提交
                 console.log(">> 等待 PoW 算力验证完成与后端提交 (最大等待 90 秒)...");
                 let altchaPassed = false;
                 
                 for (let i = 0; i < 90; i++) {
-                    const status = await page.evaluate(() => {
-                        const bodyText = document.body.innerText;
-                        
-                        // 还在验证中
-                        if (bodyText.includes('Verifying...')) return 'verifying';
-                        
-                        // 弹窗特有文字还在，说明可能卡住了或者还没点
-                        if (bodyText.includes('This will extend the life of your server')) return 'open';
-                        
-                        // 特征文字消失，说明弹窗已经关闭，续期提交完成
-                        return 'closed';
-                    });
+                    try {
+                        const status = await page.evaluate(() => {
+                            const bodyText = document.body.innerText;
+                            if (bodyText.includes('Verifying...')) return 'verifying';
+                            if (bodyText.includes('This will extend the life of your server')) return 'open';
+                            return 'closed';
+                        });
 
-                    if (status === 'closed') {
-                        console.log(`✅ 验证框已消失 (耗时约 ${i} 秒)，续期请求成功提交！`);
-                        altchaPassed = true;
-                        break;
+                        if (status === 'closed') {
+                            console.log(`✅ 验证框已消失 (耗时约 ${i} 秒)，续期请求成功提交！`);
+                            altchaPassed = true;
+                            break;
+                        }
+                    } catch (error) {
+                        // 【核心修复点】捕获页面刷新导致的错误
+                        if (error.message.includes('Execution context was destroyed') || 
+                            error.message.includes('Target closed') ||
+                            error.message.includes('Session closed')) {
+                            console.log("✅ 捕获到页面已自动刷新 (Execution context destroyed)，证明请求提交成功！");
+                            altchaPassed = true;
+                            break;
+                        } else {
+                            // 其他未知错误，静默忽略，下一次循环继续重试
+                        }
                     }
                     
-                    // 每 10 秒打印一次进度，缓解等待焦虑
                     if (i > 0 && i % 10 === 0) {
                         console.log(`... 算力验证仍在进行中 (${i} 秒)`);
                     }
@@ -348,11 +352,19 @@ async function clickBtnByText(page, text) {
 
                 if (!altchaPassed) {
                     console.log("⚠️ 90秒内弹窗未自动关闭，可能卡在 100% 或网络请求被拦截。");
-                    await snap(page, `${user.username}_07_5_timeout_stuck`);
+                    // 这里不要直接抛错，尝试强行刷新页面看看结果
                 }
 
-                // 等待页面处理并重新载入
-                await delay(6000);
+                // 页面可能正在跳转/刷新中，给予充分的等待时间
+                console.log(">> 正在等待页面重新加载最新数据...");
+                await delay(10000); 
+
+                // 如果跳转丢了目标页面，重新导航回去获取最终日期
+                if (SERVER_URL && !page.url().includes(SERVER_URL)) {
+                    await page.goto(SERVER_URL, { waitUntil: 'domcontentloaded' }).catch(()=> {});
+                    await delay(5000);
+                }
+                
                 await snap(page, `${user.username}_08_after_renew_submit`);
 
                 // 4. 获取续期后数据与警告信息
