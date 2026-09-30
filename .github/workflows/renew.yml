@@ -6,15 +6,25 @@ on:
     - cron: '0 0 * * *'
   workflow_dispatch: # 允许手动触发
     inputs:
-      chrome_version:
-        description: '可选：指定 Chrome 版本 (如 stable / 完整版本号)。留空则使用 runner 自带的 Chrome'
+      chrome_versions:
+        description: 'Chrome 版本列表(JSON 数组)。"" 表示 runner 自带 Chrome，例如 ["","152","150","148"]。多个版本会并行运行，请同时勾选下面的 probe_only'
         required: false
-        default: ''
+        default: '[""]'
+      probe_only:
+        description: '探测模式：只测试 Cloudflare 验证能否通过，不登录、不续期、不发 TG'
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   renew:
+    name: renew (chrome ${{ matrix.chrome == '' && 'runner' || matrix.chrome }})
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        chrome: ${{ fromJSON(github.event.inputs.chrome_versions || '[""]') }}
 
     steps:
     - uses: actions/checkout@v4
@@ -29,14 +39,13 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y xvfb curl jq
 
-    # 仅在手动触发并填写了 chrome_version 时才安装指定版本的 Chrome，
-    # 用于排查"runner 自带 Chrome 更新后导致 CF 验证失败"的情况
+    # matrix.chrome 非空时，安装指定版本的 Chrome (来自 Chrome for Testing)
     - name: Setup Chrome (optional, pinned)
       id: setup_chrome
-      if: ${{ github.event.inputs.chrome_version != '' }}
-      uses: browser-actions/setup-chrome@v1
+      if: ${{ matrix.chrome != '' }}
+      uses: browser-actions/setup-chrome@v2
       with:
-        chrome-version: ${{ github.event.inputs.chrome_version }}
+        chrome-version: ${{ matrix.chrome }}
 
     - name: Install Project Dependencies
       # 若仓库里提交了 package-lock.json，则用 npm ci 锁定依赖版本；否则退回 npm install
@@ -221,12 +230,13 @@ jobs:
         TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         HTTP_PROXY: "socks5://127.0.0.1:10808"
         CHROME_PATH: ${{ steps.setup_chrome.outputs.chrome-path }}
+        PROBE_ONLY: ${{ github.event.inputs.probe_only == 'true' && '1' || '' }}
       run: xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node action_renew.js
 
     - name: Upload Screenshots
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: screenshots
+        name: screenshots-${{ matrix.chrome == '' && 'runner-chrome' || matrix.chrome }}
         path: screenshots/
         if-no-files-found: ignore
