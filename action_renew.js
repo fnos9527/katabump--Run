@@ -8,10 +8,11 @@ const TG_CHAT_ID = process.env.TG_CHAT_ID;
 const SERVER_URL = process.env.SERVER_URL ? process.env.SERVER_URL.trim() : '';
 const HTTP_PROXY = process.env.HTTP_PROXY;
 const CHROME_PATH = process.env.CHROME_PATH ? process.env.CHROME_PATH.trim() : '';
+const PROBE_ONLY = process.env.PROBE_ONLY === '1'; // 探测模式：只测 Turnstile，不登录不续期
 
 const LOGIN_URL = 'https://dashboard.katabump.com/auth/login';
 const MAX_LOGIN_ATTEMPTS = 3;      // 登录最大重试次数
-const TURNSTILE_TIMEOUT_SEC = 60;  // 单次登录尝试中等待 Turnstile 的最长秒数
+const TURNSTILE_TIMEOUT_SEC = 45;  // 单次登录尝试中等待 Turnstile 的最长秒数
 
 const SCREENSHOT_DIR = path.join(__dirname, 'screenshots');
 if (!fs.existsSync(SCREENSHOT_DIR)) fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
@@ -82,15 +83,10 @@ async function clearCookies(page) {
     }
 }
 
-// 启动后打印环境信息，方便以后对比 "为什么昨天能过今天不能过"
+// 启动后打印环境信息，并把浏览器时区对齐到代理出口 IP 所在时区
 async function logEnvironment(browser, page) {
     try { console.log(`>> Chrome 版本: ${await browser.version()}`); } catch (e) {}
-    try {
-        const ua = await page.evaluate(() => navigator.userAgent);
-        const wd = await page.evaluate(() => navigator.webdriver);
-        console.log(`>> UA: ${ua}`);
-        console.log(`>> navigator.webdriver: ${wd}`);
-    } catch (e) {}
+
     try {
         await page.goto('https://www.cloudflare.com/cdn-cgi/trace', { waitUntil: 'domcontentloaded', timeout: 30000 });
         const text = await page.evaluate(() => document.body.innerText);
@@ -99,6 +95,65 @@ async function logEnvironment(browser, page) {
     } catch (e) {
         console.log(`⚠️ 出口信息获取失败: ${e.message}`);
     }
+
+    // 时区对齐：runner 默认是 UTC，而出口 IP 在美国，两者不一致本身就是一个风险信号
+    try {
+        await page.goto('https://ipinfo.io/json', { waitUntil: 'domcontentloaded', timeout: 30000 });
+        const info = JSON.parse(await page.evaluate(() => document.body.innerText));
+        if (info && info.timezone) {
+            await page.emulateTimezone(info.timezone);
+            console.log(`>> 已将浏览器时区对齐到出口 IP 所在时区: ${info.timezone}`);
+        }
+    } catch (e) {
+        console.log(`⚠️ 时区对齐已跳过: ${e.message}`);
+    }
+
+    // 在真正加载过页面之后再取指纹信号 (页面加载前取到的 webdriver 不准)
+    try {
+        const sig = await page.evaluate(() => {
+            let webgl = '';
+            try {
+                const g = document.createElement('canvas').getContext('webgl');
+                const ext = g && g.getExtension('WEBGL_debug_renderer_info');
+                webgl = ext ? g.getParameter(ext.UNMASKED_RENDERER_WEBGL) : 'no-ext';
+            } catch (e) { webgl = 'err'; }
+            return {
+                webdriver: navigator.webdriver,
+                plugins: navigator.plugins.length,
+                languages: navigator.languages.join(','),
+                timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                windowChrome: typeof window.chrome,
+                cores: navigator.hardwareConcurrency,
+                screen: `${screen.width}x${screen.height}`,
+                inner: `${innerWidth}x${innerHeight}`,
+                outer: `${outerWidth}x${outerHeight}`,
+                webgl
+            };
+        });
+        console.log(`>> UA: ${await page.evaluate(() => navigator.userAgent)}`);
+        console.log(`>> 指纹信号: ${JSON.stringify(sig)}`);
+    } catch (e) {
+        console.log(`⚠️ 指纹信号获取失败: ${e.message}`);
+    }
+}
+
+// 探测模式：只打开登录页并等待 Turnstile，用于快速比较不同 Chrome 版本
+async function runProbe(browser, page) {
+    console.log(">> [探测模式] 仅测试 Turnstile 能否通过，不登录、不续期");
+    await clearCookies(page);
+    await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await delay(2000);
+    await snap(page, 'probe_01_login_page');
+    const ok = await solveTurnstile(page);
+    await snap(page, 'probe_02_result');
+    let ver = '';
+    try { ver = await browser.version(); } catch (e) {}
+    const line = `Turnstile 探测 [${ver}]: ${ok ? '✅ PASS' : '❌ FAIL'}`;
+    console.log(line);
+    if (process.env.GITHUB_STEP_SUMMARY) {
+        try { fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, line + '\n'); } catch (e) {}
+    }
+    return ok;
 }
 
 // ============ Cloudflare Turnstile 相关 ============
@@ -148,9 +203,16 @@ async function clickTurnstile(page) {
     // 复选框在组件左侧，距左边约 28px，垂直居中
     const x = box.x + 28 + rand(-3, 3);
     const y = box.y + box.h / 2 + rand(-3, 3);
-    await humanClick(page, x, y);
-    console.log(`   ↳ 已手动点击 Turnstile 复选框 (${Math.round(x)}, ${Math.round(y)})`);
-    return true;
+    try {
+        await humanClick(page, x, y);
+        console.log(`   ↳ 已手动点击 Turnstile 复选框 (${Math.round(x)}, ${Math.round(y)})`);
+        return true;
+    } catch (e) {
+        // 插件自身的自动点击也在使用鼠标，偶尔会状态冲突，忽略即可
+        console.log(`   ↳ 手动点击被跳过: ${e.message}`);
+        await page.mouse.up().catch(() => {});
+        return false;
+    }
 }
 
 async function resetTurnstile(page) {
@@ -163,7 +225,7 @@ async function resetTurnstile(page) {
 // 节奏: 0~10s 交给插件自动点击 → 10s 手动点一次 → 25s 重置再点 → 40s 重置再点 → 超时失败
 async function solveTurnstile(page, totalSec = TURNSTILE_TIMEOUT_SEC) {
     const start = Date.now();
-    const steps = [10, 25, 40];
+    const steps = [12, 28];
     let stepIdx = 0;
 
     while ((Date.now() - start) / 1000 < totalSec) {
@@ -398,7 +460,8 @@ async function clickBtnByText(page, text) {
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--window-size=1280,720',
-            '--lang=en-US'
+            '--lang=en-US',
+            '--disable-blink-features=AutomationControlled'
         ],
         customConfig: {},
         turnstile: true,
@@ -440,6 +503,12 @@ async function clickBtnByText(page, text) {
 
     await page.setViewport({ width: 1280, height: 720 }).catch(() => {});
     await logEnvironment(browser, page);
+
+    if (PROBE_ONLY) {
+        const ok = await runProbe(browser, page);
+        await browser.close().catch(() => {});
+        process.exit(ok ? 0 : 1);
+    }
 
     // 所有用户复用同一个页面 (pRB 的 Turnstile 自动处理挂在初始页面上)，每个用户前清 Cookie
     for (let user of users) {
