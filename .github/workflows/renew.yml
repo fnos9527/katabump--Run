@@ -5,28 +5,48 @@ on:
     # 每天 UTC 0点 (北京时间 8点) 运行
     - cron: '0 0 * * *'
   workflow_dispatch: # 允许手动触发
+    inputs:
+      chrome_version:
+        description: '可选：指定 Chrome 版本 (如 stable / 完整版本号)。留空则使用 runner 自带的 Chrome'
+        required: false
+        default: ''
 
 jobs:
   renew:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 25
+
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
         node-version: '20'
-        
+
     - name: Install System Dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y xvfb curl jq
-        
+
+    # 仅在手动触发并填写了 chrome_version 时才安装指定版本的 Chrome，
+    # 用于排查"runner 自带 Chrome 更新后导致 CF 验证失败"的情况
+    - name: Setup Chrome (optional, pinned)
+      id: setup_chrome
+      if: ${{ github.event.inputs.chrome_version != '' }}
+      uses: browser-actions/setup-chrome@v1
+      with:
+        chrome-version: ${{ github.event.inputs.chrome_version }}
+
     - name: Install Project Dependencies
-      # 移除了原有的 npx playwright install 等步骤，直接让 npm install 完成配置即可
+      # 若仓库里提交了 package-lock.json，则用 npm ci 锁定依赖版本；否则退回 npm install
       run: |
-        npm install
+        if [ -f package-lock.json ]; then
+          npm ci
+        else
+          echo "⚠️ 未发现 package-lock.json，依赖版本会浮动，建议提交 lock 文件"
+          npm install
+        fi
 
     - name: Setup and Run Xray (Robust VLESS to Socks5)
       env:
@@ -36,7 +56,7 @@ jobs:
         curl -L -o xray.zip https://github.com/XTLS/Xray-core/releases/download/v25.9.11/Xray-linux-64.zip
         unzip -q xray.zip -d xray-bin
         chmod +x ./xray-bin/xray
-        
+
         echo "正在使用 Node.js 精准解析 VLESS 并生成配置..."
         node -e '
         try {
@@ -159,13 +179,13 @@ jobs:
 
         echo "正在后台启动 Xray 代理服务..."
         ./xray-bin/xray -config config.json > xray.log 2>&1 &
-        
+
         echo "等待代理通道建立..."
         sleep 5
-        
+
         echo "=== 正在检查本地 10808 端口占用情况 ==="
         ss -lntp | grep 10808 || echo "警告: 10808 端口似乎没有被监听！"
-        
+
         echo "=== 尝试打印 Xray 运行日志 ==="
         cat xray.log || true
 
@@ -174,11 +194,24 @@ jobs:
           echo "❌ Xray 未能监听 10808 端口，代理未启动成功，终止工作流。"
           exit 1
         fi
-        if ! curl -s --max-time 10 -x socks5://127.0.0.1:10808 -o /dev/null -w "%{http_code}" https://www.google.com | grep -q "200\|301\|302"; then
+        if ! curl -s --max-time 10 -x socks5h://127.0.0.1:10808 -o /dev/null -w "%{http_code}" https://www.google.com | grep -q "200\|301\|302"; then
           echo "❌ 代理无法正常访问外网，请检查 HTTP_PROXY 密钥中的 VLESS 节点是否有效。"
           exit 1
         fi
         echo "✅ 代理连通性检测通过！"
+
+    # 打印环境信息(不输出具体 IP)，以后出问题可以和成功那天的日志对比
+    - name: Diagnostics (proxy exit & versions)
+      env:
+        CHROME_PATH: ${{ steps.setup_chrome.outputs.chrome-path }}
+      run: |
+        echo "--- 代理出口信息 (已隐去 IP) ---"
+        curl -s --max-time 15 -x socks5h://127.0.0.1:10808 https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(loc|colo|http|tls|warp)=' || echo "获取失败"
+        echo "--- Chrome 版本 ---"
+        "${CHROME_PATH:-google-chrome}" --version || true
+        echo "--- Node / 依赖版本 ---"
+        node -v
+        npm ls puppeteer-real-browser || true
 
     - name: Run Renew Script
       env:
@@ -187,6 +220,7 @@ jobs:
         TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
         TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         HTTP_PROXY: "socks5://127.0.0.1:10808"
+        CHROME_PATH: ${{ steps.setup_chrome.outputs.chrome-path }}
       run: xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node action_renew.js
 
     - name: Upload Screenshots
@@ -195,3 +229,4 @@ jobs:
       with:
         name: screenshots
         path: screenshots/
+        if-no-files-found: ignore
