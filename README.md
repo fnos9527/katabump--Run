@@ -19,7 +19,7 @@ latest 版 Xray（v26.x）→ 配置里带 allowInsecure 字段直接被拒绝�
 固定用的是 v25.9.11——这个版本本身就是 allowInsecure 被移除之前发布的，它对这个字段的处理是"真的会跳过校验"，而不是新版那种"看到就报错拒绝"。   
 所以直接沿用 allowInsecure: true 才是这个版本组合下真正正确的写法，能彻底绕开这种老式证书的校验问题。
 
-#sing-box
+#sing-box    
 GitHub Secrets 里有一个可选密钥：NODE_LINK（VLESS 节点链接 根据值分别生成 wsSettings / tcpSettings / grpcSettings / httpSettings兼容多种格式）。
 工作流 Setup optional VLESS node 步骤会检查：
 如果 NODE_LINK 有值 → 下载并运行（通常是 sing-box）本机拉起本地代理。
