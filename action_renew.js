@@ -340,14 +340,14 @@ async function loginWithRetry(page, user) {
     return false;
 }
 
-// 优化后的降级 Cookie 登录（修复域匹配与加载问题）
+// 修复后的 Cookie 登录：直接跳转到目标服务器页面或主面板，彻底避免重定向死循环
 async function loginWithCookie(page, cookieStr) {
     if (!cookieStr) return false;
     try {
         console.log(">> 正在尝试使用 Cookie 登录...");
         
-        // 先导航至登录页，让浏览器上下文对准该域名
-        await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        // 先打开主域名建立环境
+        await page.goto('https://dashboard.katabump.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
         await delay(2000);
 
         const cookies = cookieStr.split(';').map(item => {
@@ -359,7 +359,8 @@ async function loginWithCookie(page, cookieStr) {
                 return {
                     name: name,
                     value: value,
-                    url: LOGIN_URL // 使用 url 让浏览器自动匹配正确的域和路径
+                    domain: 'dashboard.katabump.com',
+                    path: '/'
                 };
             }
             return null;
@@ -367,17 +368,19 @@ async function loginWithCookie(page, cookieStr) {
 
         if (cookies.length > 0) {
             await page.setCookie(...cookies);
-            // 写入 Cookie 后重新加载页面使其生效
-            await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
-            await delay(3000);
+            
+            // 直接跳转到用户配置的服务器页面（或主面板），不再访问登录页，防止死循环
+            const targetUrl = SERVER_URL || 'https://dashboard.katabump.com/';
+            await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+            await delay(4000);
             
             const onLoginUrl = page.url().includes('/auth/login');
             const hasPwd = await page.$('input[type="password"]');
             if (!onLoginUrl && !hasPwd) {
-                console.log("✅ Cookie 登录成功！");
+                console.log("✅ Cookie 登录成功并成功进入后台！");
                 return true;
             } else {
-                console.log("⚠️ Cookie 登录后仍停留在登录页，可能 Cookie 已过期或不完整。");
+                console.log("⚠️ Cookie 登录后被重定向回登录页，可能 Cookie 已失效或不完整。");
             }
         }
     } catch (e) {
@@ -537,7 +540,7 @@ async function clickBtnByText(page, text) {
         try {
             console.log(`=== 处理用户: ${user.username} ===`);
 
-            // 1. 登录逻辑：密码重试失败后，无缝切入 Cookie 降级登录
+            // 1. 密码登录重试失败后，无缝切入 Cookie 登录
             let loginOk = await loginWithRetry(page, user);
             if (!loginOk && user.cookie) {
                 console.log(`⚠️ 账号密码登录失败，正在自动切换为 Cookie 登录模式...`);
@@ -557,8 +560,8 @@ async function clickBtnByText(page, text) {
                 continue;
             }
 
-            // 2. 获取续期前参数
-            if (SERVER_URL) {
+            // 2. 已经是登录态，直接导航或确认服务器页面
+            if (SERVER_URL && !page.url().includes(SERVER_URL)) {
                 await page.goto(SERVER_URL, { waitUntil: 'domcontentloaded' });
                 await delay(3000);
                 await snap(page, `${user.username}_05_server_page`);
