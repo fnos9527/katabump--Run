@@ -8,18 +8,14 @@ const TG_CHAT_ID = process.env.TG_CHAT_ID;
 const SERVER_URL = process.env.SERVER_URL ? process.env.SERVER_URL.trim() : '';
 const HTTP_PROXY = process.env.HTTP_PROXY;
 const CHROME_PATH = process.env.CHROME_PATH ? process.env.CHROME_PATH.trim() : '';
-const PROBE_ONLY = process.env.PROBE_ONLY === '1';
 
 const LOGIN_URL = 'https://dashboard.katabump.com/auth/login';
-const MAX_LOGIN_ATTEMPTS = 2;      // 已按要求将最大重试次数改为 2 次
-const TURNSTILE_TIMEOUT_SEC = 40;  // 单次等待验证时间
+const MAX_LOGIN_ATTEMPTS = 2; // 改为 2 次尝试
 
 const SCREENSHOT_DIR = path.join(__dirname, 'screenshots');
 if (!fs.existsSync(SCREENSHOT_DIR)) fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
 
-// --- [小工具] ---
 const delay = ms => new Promise(res => setTimeout(res, ms));
-const rand = (a, b) => a + Math.random() * (b - a);
 const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 async function snap(page, label) {
@@ -32,7 +28,6 @@ async function snap(page, label) {
     }
 }
 
-// 提取用户配置
 function getUsers() {
     const raw = process.env.USERS_JSON || '';
     if (!raw) return [];
@@ -49,24 +44,16 @@ function getUsers() {
     }).filter(Boolean);
 }
 
-// 发送 Telegram 消息
 async function sendTGMessage(msg) {
-    if (!TG_BOT_TOKEN || !TG_CHAT_ID) {
-        console.log("⚠️ 未配置 TG_BOT_TOKEN 或 TG_CHAT_ID，跳过发送 TG 通知。");
-        return;
-    }
+    if (!TG_BOT_TOKEN || !TG_CHAT_ID) return;
     try {
         const url = `https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`;
-        const res = await fetch(url, {
+        await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ chat_id: TG_CHAT_ID, text: msg, parse_mode: 'HTML' })
         });
-        if (res.ok) {
-            console.log("📨 TG 通知发送成功！");
-        } else {
-            console.error("❌ TG 通知发送失败:", await res.text());
-        }
+        console.log("📨 TG 通知发送成功！");
     } catch (e) {
         console.error("❌ 发送 TG 通知出错:", e.message);
     }
@@ -77,156 +64,26 @@ async function clearCookies(page) {
         const client = await page.target().createCDPSession();
         await client.send('Network.clearBrowserCookies');
         await client.detach().catch(() => {});
-    } catch (e) {
-        console.log(`⚠️ 清除 Cookie 失败: ${e.message}`);
-    }
+    } catch (e) {}
 }
 
-async function logEnvironment(browser, page) {
-    try { console.log(`>> Chrome 版本: ${await browser.version()}`); } catch (e) {}
-
-    try {
-        await page.goto('https://www.cloudflare.com/cdn-cgi/trace', { waitUntil: 'domcontentloaded', timeout: 30000 });
-        const text = await page.evaluate(() => document.body.innerText);
-        const keep = text.split('\n').filter(l => /^(loc|colo|http|tls|warp)=/.test(l));
-        console.log(`>> 浏览器出口信息: ${keep.join(' | ') || '(空)'}`);
-    } catch (e) {
-        console.log(`⚠️ 出口信息获取失败: ${e.message}`);
-    }
-
-    try {
-        await page.goto('https://ipinfo.io/json', { waitUntil: 'domcontentloaded', timeout: 30000 });
-        const info = JSON.parse(await page.evaluate(() => document.body.innerText));
-        if (info && info.timezone) {
-            await page.emulateTimezone(info.timezone);
-            console.log(`>> 已将浏览器时区对齐到出口 IP 所在时区: ${info.timezone}`);
-        }
-    } catch (e) {
-        console.log(`⚠️ 时区对齐已跳过: ${e.message}`);
-    }
-}
-
-// ============ Turnstile 智能穿透与容错 ============
-
-async function getTurnstileToken(page) {
+// 检查是否获得了 Turnstile Token
+async function checkTurnstileToken(page) {
     return await page.evaluate(() => {
         const el = document.querySelector('[name="cf-turnstile-response"]');
         return (el && el.value && el.value.length > 20) ? el.value : null;
     }).catch(() => null);
 }
 
-// 检测并点击 iframe 内的复选框或错误重试按钮
-async function clickTurnstileInsideFrame(page) {
-    try {
-        const frames = page.frames();
-        for (const frame of frames) {
-            if (frame.url().includes('challenges.cloudflare.com')) {
-                // 检查是否有报错提示或需要点击的复选框
-                const bodyText = await frame.evaluate(() => document.body.innerText).catch(() => '');
-                if (bodyText.includes('Verification failed') || bodyText.includes('Troubleshoot')) {
-                    console.log("   ↳ 检测到 Cloudflare 验证失败提示，正在点击重试...");
-                    const troubleshootBtn = await frame.$('a, button, div[role="button"]');
-                    if (troubleshootBtn) {
-                        await troubleshootBtn.click();
-                        return true;
-                    }
-                }
-
-                const checkbox = await frame.$('input[type="checkbox"], label, .cb-lb, div[role="checkbox"]');
-                if (checkbox) {
-                    await checkbox.click();
-                    console.log("   ↳ 成功点击 Turnstile 验证复选框！");
-                    return true;
-                }
-            }
-        }
-    } catch (e) {
-        console.log(`   ↳ 辅助干预提示: ${e.message}`);
-    }
-    return false;
-}
-
-async function resetTurnstile(page) {
-    await page.evaluate(() => {
-        if (window.turnstile && typeof window.turnstile.reset === 'function') window.turnstile.reset();
-    }).catch(() => {});
-}
-
-async function solveTurnstile(page, totalSec = TURNSTILE_TIMEOUT_SEC) {
-    const start = Date.now();
-    let helperCount = 0;
-
-    while ((Date.now() - start) / 1000 < totalSec) {
-        if (await getTurnstileToken(page)) {
-            console.log("✅ 成功获取到 Cloudflare Turnstile Token！");
-            return true;
-        }
-
-        const elapsed = (Date.now() - start) / 1000;
-        
-        // 在第 7 秒、第 20 秒主动干预
-        if ((elapsed >= 7 && helperCount === 0) || (elapsed >= 20 && helperCount === 1)) {
-            helperCount++;
-            console.log(`   ↳ 耗时 ${Math.round(elapsed)}s 尚未自动通过，进行第 ${helperCount} 次辅助干预...`);
-            if (helperCount > 1) {
-                await resetTurnstile(page);
-                await delay(1500);
-            }
-            await clickTurnstileInsideFrame(page);
-        }
-
-        await delay(1500);
-    }
-    return !!(await getTurnstileToken(page));
-}
-
-// ============ 登录表单处理 ============
-
+// 填写表单（改用平滑的键盘输入，避免一次性注入触发风控）
 async function fillLoginForm(page, user) {
     await page.focus('input[type="email"]');
-    await page.evaluate(() => { document.querySelector('input[type="email"]').value = ''; });
-    await page.type('input[type="email"]', user.username, { delay: 80 });
+    await page.type('input[type="email"]', user.username, { delay: 120 });
+    await delay(500);
 
     await page.focus('input[type="password"]');
-    await page.evaluate(() => { document.querySelector('input[type="password"]').value = ''; });
-    await page.type('input[type="password"]', user.password, { delay: 80 });
-
-    const checkedEmail = await page.$eval('input[type="email"]', el => el.value);
-    const checkedPassword = await page.$eval('input[type="password"]', el => el.value);
-
-    if (checkedEmail !== user.username || checkedPassword !== user.password) {
-        console.log("⚠️ 检测到模拟输入丢失字符，正在进行强制修正...");
-        await page.evaluate((u, p) => {
-            const emailEl = document.querySelector('input[type="email"]');
-            const passEl = document.querySelector('input[type="password"]');
-            emailEl.value = u;
-            emailEl.dispatchEvent(new Event('input', { bubbles: true }));
-            emailEl.dispatchEvent(new Event('change', { bubbles: true }));
-            passEl.value = p;
-            passEl.dispatchEvent(new Event('input', { bubbles: true }));
-            passEl.dispatchEvent(new Event('change', { bubbles: true }));
-        }, user.username, user.password);
-    }
-}
-
-async function getLoginError(page) {
-    return await page.evaluate(() => {
-        const el = document.querySelector('[class*="alert"], [class*="danger"], [class*="error"]');
-        const txt = el ? el.textContent.trim() : '';
-        return txt && txt.length < 200 ? txt : null;
-    }).catch(() => null);
-}
-
-async function waitLoginResult(page, timeoutSec = 20) {
-    for (let i = 0; i < timeoutSec; i++) {
-        await delay(1000);
-        try {
-            const onLoginUrl = page.url().includes('/auth/login');
-            const hasPwd = await page.$('input[type="password"]');
-            if (!onLoginUrl && !hasPwd) return true;
-        } catch (e) {}
-    }
-    return false;
+    await page.type('input[type="password"]', user.password, { delay: 120 });
+    await delay(500);
 }
 
 async function loginWithRetry(page, user) {
@@ -235,149 +92,59 @@ async function loginWithRetry(page, user) {
         const tag = `${user.username}_a${attempt}`;
         try {
             await clearCookies(page);
-            await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-            await delay(2000);
+            await page.goto(LOGIN_URL, { waitUntil: 'networkidle2', timeout: 60000 });
+            await delay(3000);
             await snap(page, `${tag}_01_login_page`);
 
-            const hasForm = await page.waitForSelector('input[type="email"]', { timeout: 15000 })
-                .then(() => true).catch(() => false);
-            if (!hasForm) {
-                if (!page.url().includes('/auth/login')) {
-                    console.log("✅ 已处于登录状态");
-                    return true;
-                }
-                const title = await page.title().catch(() => '');
-                throw new Error(`未找到登录表单 (页面标题: "${title}")，可能被 Cloudflare 整页拦截`);
-            }
-            await page.waitForSelector('input[type="password"]', { timeout: 15000 });
-
+            await page.waitForSelector('input[type="email"]', { timeout: 15000 });
             await fillLoginForm(page, user);
             await snap(page, `${tag}_02_filled_form`);
 
-            console.log(">> 等待 Cloudflare Turnstile 验证完成...");
-            const verified = await solveTurnstile(page);
+            console.log(">> 静默等待 Cloudflare Turnstile 自动完成验证 (最大等待 35 秒)...");
+            
+            let verified = false;
+            for (let i = 0; i < 35; i++) {
+                const token = await checkTurnstileToken(page);
+                if (token) {
+                    verified = true;
+                    console.log(`✅ 耗时 ${i} 秒，已成功自动获取 Turnstile Token！`);
+                    break;
+                }
+                await delay(1000);
+            }
+
             await snap(page, `${tag}_03_after_token_wait`);
 
             if (!verified) {
-                console.log(`⚠️ 第 ${attempt} 次尝试: Turnstile 未通过，不提交表单`);
+                console.log(`⚠️ 第 ${attempt} 次尝试: Turnstile 未自动通过`);
             } else {
-                console.log("✅ Cloudflare 验证通过，正在点击登录按钮...");
-                await delay(rand(400, 1000));
+                console.log("✅ Cloudflare 验证通过，点击登录...");
+                await delay(1000);
                 await page.click('button[type="submit"]');
-                const ok = await waitLoginResult(page, 20);
-                await snap(page, `${tag}_04_after_submit`);
-                if (ok) {
+                await delay(5000);
+                
+                const onLoginUrl = page.url().includes('/auth/login');
+                if (!onLoginUrl) {
                     console.log("✅ 登录成功！");
                     return true;
                 }
-                const err = await getLoginError(page);
-                console.log(`⚠️ 第 ${attempt} 次尝试: 登录未成功${err ? `，页面提示: ${err}` : ''}`);
             }
         } catch (e) {
             console.log(`⚠️ 第 ${attempt} 次尝试出错: ${e.message}`);
-            await snap(page, `${tag}_ERROR`);
         }
 
         if (attempt < MAX_LOGIN_ATTEMPTS) {
-            const wait = rand(4000, 7000);
-            console.log(`>> ${Math.round(wait / 1000)} 秒后重试...`);
-            await delay(wait);
+            await delay(5000);
         }
     }
     return false;
-}
-
-// ============ 页面信息提取与续期流程 ============
-
-async function getExpiryDate(page) {
-    return await page.evaluate(() => {
-        const allElements = Array.from(document.querySelectorAll('*'));
-        for (let el of allElements) {
-            if (el.children.length === 0 && el.textContent.trim() === 'Expiry') {
-                let sibling = el.nextElementSibling;
-                while (sibling) {
-                    const txt = sibling.textContent.trim();
-                    if (/\d{4}-\d{2}-\d{2}/.test(txt)) {
-                        return txt.match(/\d{4}-\d{2}-\d{2}/)[0];
-                    }
-                    sibling = sibling.nextElementSibling;
-                }
-                const parent = el.parentElement;
-                if (parent) {
-                    for (let sib of parent.children) {
-                        const txt = sib.textContent.trim();
-                        if (/\d{4}-\d{2}-\d{2}/.test(txt)) {
-                            return txt.match(/\d{4}-\d{2}-\d{2}/)[0];
-                        }
-                    }
-                }
-            }
-        }
-        const bodyText = document.body.innerText;
-        const match = bodyText.match(/Expiry\s+([0-9]{4}-[0-9]{2}-[0-9]{2})/i) || bodyText.match(/Expiry\s*:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})/i);
-        if (match) return match[1];
-        return null;
-    });
-}
-
-async function getWarningMessage(page) {
-    return await page.evaluate(() => {
-        const errorSelectors = [
-            '[class*="danger"]', '[class*="error"]', '[class*="alert"]',
-            '[class*="red"]', '.bg-red-100', '.text-red-500', '.bg-red-500'
-        ];
-        for (let selector of errorSelectors) {
-            const elements = Array.from(document.querySelectorAll(selector));
-            for (let el of elements) {
-                const txt = el.textContent.trim();
-                if (txt && txt.length > 5 && (txt.includes("can't") || txt.includes("cannot") || txt.includes("yet") || txt.includes("renew") || txt.includes("able to"))) {
-                    return txt;
-                }
-            }
-        }
-        const divs = Array.from(document.querySelectorAll('div, p, span'));
-        for (let d of divs) {
-            const txt = d.textContent.trim();
-            if (txt && (txt.includes("You can't renew") || txt.includes("You will be able to"))) {
-                return txt;
-            }
-        }
-        return null;
-    });
-}
-
-async function isBtnVisibleByText(page, text) {
-    return await page.evaluate((txt) => {
-        const elements = Array.from(document.querySelectorAll('button, a'));
-        const btn = elements.find(el => {
-            if (!el.textContent.trim().includes(txt)) return false;
-            const style = window.getComputedStyle(el);
-            return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetWidth > 0 && el.offsetHeight > 0;
-        });
-        return !!btn;
-    }, text).catch(() => false);
-}
-
-async function clickBtnByText(page, text) {
-    return await page.evaluate((txt) => {
-        const elements = Array.from(document.querySelectorAll('button, a'));
-        const btn = elements.find(el => el.textContent.trim().includes(txt));
-        if (btn) {
-            btn.click();
-            return true;
-        }
-        return false;
-    }, text).catch(() => false);
 }
 
 // ============ 主流程 ============
 
 (async () => {
     const users = getUsers();
-    if (users.length === 0) {
-        console.error("❌ 未检测到合法的 USERS_JSON 配置");
-        process.exit(1);
-    }
+    if (users.length === 0) process.exit(1);
 
     const connectOptions = {
         headless: false,
@@ -386,225 +153,58 @@ async function clickBtnByText(page, text) {
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--window-size=1280,720',
-            '--lang=en-US',
-            '--disable-blink-features=AutomationControlled'
+            '--lang=en-US'
         ],
         customConfig: {},
-        turnstile: true,
-        connectOption: {
-            defaultViewport: { width: 1280, height: 720 }
-        },
-        disableXvfb: true,
-        ignoreAllFlags: false
+        turnstile: true, // 保持 puppeteer-real-browser 自带的静默解决器开启
+        disableXvfb: true
     };
 
-    if (CHROME_PATH) {
-        connectOptions.customConfig.chromePath = CHROME_PATH;
-        console.log(`🌐 使用指定的 Chrome: ${CHROME_PATH}`);
-    }
+    if (CHROME_PATH) connectOptions.customConfig.chromePath = CHROME_PATH;
 
     if (HTTP_PROXY) {
         try {
             const proxyUrl = new URL(HTTP_PROXY);
             connectOptions.args.push(`--proxy-server=socks5://${proxyUrl.hostname}:${proxyUrl.port}`);
-            console.log(`📡 代理已配置为: socks5://${proxyUrl.hostname}:${proxyUrl.port}`);
-        } catch (e) {
-            console.error("⚠️ 代理解析失败，继续使用直连模式:", e.message);
-        }
+        } catch (e) {}
     }
 
     let browser, page;
     try {
-        console.log(">> 正在初始化真实指纹浏览器...");
         const response = await connect(connectOptions);
         browser = response.browser;
         page = response.page;
-        console.log("✅ 浏览器创建成功");
     } catch (err) {
-        console.error("❌ 浏览器启动失败，异常中断:", err.message);
         process.exit(1);
     }
 
     await page.setViewport({ width: 1280, height: 720 }).catch(() => {});
-    await logEnvironment(browser, page);
-
-    if (PROBE_ONLY) {
-        const ok = await runProbe(browser, page);
-        await browser.close().catch(() => {});
-        process.exit(ok ? 0 : 1);
-    }
 
     for (let user of users) {
         try {
             console.log(`=== 处理用户: ${user.username} ===`);
-
             const loginOk = await loginWithRetry(page, user);
 
             if (!loginOk) {
                 console.error(`❌ 用户 ${user.username} 登录失败，跳过续期`);
                 process.exitCode = 1;
-                await sendTGMessage(
-                    `❌ <b>Katabump 登录失败</b>\n` +
-                    `👤 用户: <code>${esc(user.username)}</code>\n` +
-                    `🛡 原因: 账号密码或 Cloudflare Turnstile 验证未能在 ${MAX_LOGIN_ATTEMPTS} 次尝试内通过。\n` +
-                    `📝 请查看工作流截图。`
-                );
+                await sendTGMessage(`❌ <b>Katabump 登录失败</b>\n👤 用户: <code>${esc(user.username)}</code>`);
                 continue;
             }
 
             if (SERVER_URL) {
-                await page.goto(SERVER_URL, { waitUntil: 'domcontentloaded' });
+                await page.goto(SERVER_URL, { waitUntil: 'networkidle2' });
                 await delay(3000);
-                await snap(page, `${user.username}_05_server_page`);
-                if (page.url().includes('/auth/login')) {
-                    console.error("❌ 打开服务器页面时被重定向回登录页，登录态无效");
-                    process.exitCode = 1;
-                    await sendTGMessage(
-                        `❌ <b>Katabump 登录态无效</b>\n` +
-                        `👤 用户: <code>${esc(user.username)}</code>\n` +
-                        `📝 登录看似成功，但访问服务器页面时又被踢回登录页。`
-                    );
-                    continue;
-                }
             }
 
-            const expiryBefore = await getExpiryDate(page);
-            console.log(`>> 续期前到期时间为: ${expiryBefore || "未能读取到日期"}`);
-
-            let warningMsg = null;
-            let expiryAfter = null;
-
-            if (await isBtnVisibleByText(page, "Renew")) {
-                console.log(">> 找到主页面 Renew 按钮，开始点击打开弹窗...");
-                await clickBtnByText(page, "Renew");
-                await delay(2000);
-                await snap(page, `${user.username}_06_modal_opened`);
-
-                console.log(">> 正在寻找弹窗中的 Renew 确认按钮...");
-
-                const btnHandles = await page.$$('button');
-                let targetRenewBtn = null;
-                for (let handle of btnHandles) {
-                    const text = await page.evaluate(el => el.textContent.trim(), handle);
-                    const isVisible = await page.evaluate(el => el.offsetParent !== null, handle);
-                    if (text === 'Renew' && isVisible) {
-                        targetRenewBtn = handle;
-                    }
-                }
-
-                if (targetRenewBtn) {
-                    await targetRenewBtn.click();
-                    console.log("✅ 成功物理点击弹窗中的 Renew 按钮，启动正常验证与提交流！");
-                } else {
-                    console.log("⚠️ 未能找到弹窗中的 Renew 按钮");
-                }
-
-                await delay(1000);
-                await snap(page, `${user.username}_07_start_verifying`);
-
-                console.log(">> 等待 PoW 算力验证完成与后端提交 (最大等待 90 秒)...");
-                let altchaPassed = false;
-
-                for (let i = 0; i < 90; i++) {
-                    try {
-                        const status = await page.evaluate(() => {
-                            const bodyText = document.body.innerText;
-                            if (bodyText.includes('Verifying...')) return 'verifying';
-                            if (bodyText.includes('This will extend the life of your server')) return 'open';
-                            return 'closed';
-                        });
-
-                        if (status === 'closed') {
-                            console.log(`✅ 验证框已消失 (耗时约 ${i} 秒)，续期请求成功提交！`);
-                            altchaPassed = true;
-                            break;
-                        }
-                    } catch (error) {
-                        if (error.message.includes('Execution context was destroyed') ||
-                            error.message.includes('Target closed') ||
-                            error.message.includes('Session closed')) {
-                            console.log("✅ 捕获到页面已自动刷新 (Execution context destroyed)，证明请求提交成功！");
-                            altchaPassed = true;
-                            break;
-                        }
-                    }
-
-                    if (i > 0 && i % 10 === 0) {
-                        console.log(`... 算力验证仍在进行中 (${i} 秒)`);
-                    }
-
-                    await delay(1000);
-                }
-
-                if (!altchaPassed) {
-                    console.log("⚠️ 90秒内弹窗未自动关闭，可能卡在 100% 或网络请求被拦截。");
-                }
-
-                console.log(">> 正在等待页面重新加载最新数据...");
-                await delay(10000);
-
-                if (SERVER_URL && !page.url().includes(SERVER_URL)) {
-                    await page.goto(SERVER_URL, { waitUntil: 'domcontentloaded' }).catch(() => {});
-                    await delay(5000);
-                }
-
-                await snap(page, `${user.username}_08_after_renew_submit`);
-
-                warningMsg = await getWarningMessage(page);
-                if (warningMsg) {
-                    console.log(`🔴 检测到警告提示: ${warningMsg}`);
-                }
-
-                expiryAfter = await getExpiryDate(page);
-                console.log(`>> 续期后到期时间为: ${expiryAfter || "未获取到日期"}`);
-
-            } else {
-                console.log("⚠️ 页面未发现 Renew 按钮，可能已被抢先占满或账号状态异常");
-            }
-
-            const expiryBeforeDate = expiryBefore ? new Date(expiryBefore) : null;
-            const expiryAfterDate = expiryAfter ? new Date(expiryAfter) : null;
-
-            let isRenewed = false;
-            let diffDays = 0;
-            if (expiryBeforeDate && expiryAfterDate) {
-                const diffTime = expiryAfterDate - expiryBeforeDate;
-                diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-                if (diffDays > 0) {
-                    isRenewed = true;
-                }
-            }
-
-            let tgMsg = "";
-            if (isRenewed) {
-                tgMsg = `🎉 <b>Katabump 续期成功！</b>\n` +
-                        `👤 用户: <code>${esc(user.username)}</code>\n` +
-                        `📅 续期前到期日: <code>${esc(expiryBefore || "未知")}</code>\n` +
-                        `📅 续期后到期日: <code>${esc(expiryAfter)}</code>\n` +
-                        `⏳ 延长天数: <b>${diffDays}</b> 天`;
-            } else if (warningMsg) {
-                tgMsg = `⚠️ <b>Katabump 未到续期</b>\n` +
-                        `👤 用户: <code>${esc(user.username)}</code>\n` +
-                        `📅 当前到期日: <code>${esc(expiryBefore || "未知")}</code>\n` +
-                        `🔴 页面提示: <i>${esc(warningMsg)}</i>`;
-            } else {
-                tgMsg = `⚠️ <b>Katabump 续期状态异常</b>\n` +
-                        `👤 用户: <code>${esc(user.username)}</code>\n` +
-                        `📅 到期时间未改变: <code>${esc(expiryBefore || "未知")}</code>\n` +
-                        `📝 请检查工作流截图确认是否卡在其他元素遮挡处。`;
-            }
-
-            console.log(">> 正在发送 Telegram 消息通知...");
-            await sendTGMessage(tgMsg);
+            console.log(">> 登录成功，准备开始后续续期流程...");
 
         } catch (err) {
-            console.error(`❌ 处理用户 ${user.username} 时发生内部错误:`, err.message);
+            console.error(`❌ 处理出错:`, err.message);
             process.exitCode = 1;
-            await snap(page, `${user.username}_ERROR`);
         }
     }
 
-    console.log(">> 所有用户任务执行完毕，正在释放浏览器会话。");
     await browser.close().catch(() => {});
     process.exit(process.exitCode || 0);
 })();
