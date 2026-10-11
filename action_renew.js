@@ -32,21 +32,41 @@ async function snap(page, label) {
     }
 }
 
-// 提取用户配置 (支持 JSON 数组，或每行 "邮箱:密码"，密码中允许包含冒号)
+// 提取用户配置 (支持 JSON 数组，或每行 "邮箱:密码"，并自动匹配 COOKIES_JSON)
 function getUsers() {
     const raw = process.env.USERS_JSON || '';
-    if (!raw) return [];
+    const cookiesRaw = process.env.COOKIES_JSON || '';
+    
+    let cookiesMap = {};
     try {
-        if (raw.trim().startsWith('[')) return JSON.parse(raw);
+        if (cookiesRaw.trim().startsWith('{')) {
+            cookiesMap = JSON.parse(cookiesRaw);
+        }
     } catch (e) {}
-    return raw.split('\n').map(line => {
-        const l = line.trim();
-        const idx = l.indexOf(':');
-        if (idx <= 0) return null;
-        const username = l.slice(0, idx).trim();
-        const password = l.slice(idx + 1).trim();
-        return (username && password) ? { username, password } : null;
-    }).filter(Boolean);
+
+    let users = [];
+    try {
+        if (raw.trim().startsWith('[')) {
+            users = JSON.parse(raw);
+        } else {
+            users = raw.split('\n').map(line => {
+                const l = line.trim();
+                const idx = l.indexOf(':');
+                if (idx <= 0) return null;
+                const username = l.slice(0, idx).trim();
+                const password = l.slice(idx + 1).trim();
+                return (username && password) ? { username, password } : null;
+            }).filter(Boolean);
+        }
+    } catch (e) {}
+
+    // 将环境变量中的 Cookie 绑定到对应的用户对象上
+    return users.map(u => {
+        if (!u.cookie && cookiesMap[u.username]) {
+            u.cookie = cookiesMap[u.username];
+        }
+        return u;
+    });
 }
 
 // 发送 Telegram 消息
@@ -96,7 +116,6 @@ async function logEnvironment(browser, page) {
         console.log(`⚠️ 出口信息获取失败: ${e.message}`);
     }
 
-    // 时区对齐：runner 默认是 UTC，而出口 IP 在美国，两者不一致本身就是一个风险信号
     try {
         await page.goto('https://ipinfo.io/json', { waitUntil: 'domcontentloaded', timeout: 30000 });
         const info = JSON.parse(await page.evaluate(() => document.body.innerText));
@@ -108,7 +127,6 @@ async function logEnvironment(browser, page) {
         console.log(`⚠️ 时区对齐已跳过: ${e.message}`);
     }
 
-    // 在真正加载过页面之后再取指纹信号 (页面加载前取到的 webdriver 不准)
     try {
         const sig = await page.evaluate(() => {
             let webgl = '';
@@ -137,7 +155,6 @@ async function logEnvironment(browser, page) {
     }
 }
 
-// 探测模式：只打开登录页并等待 Turnstile，用于快速比较不同 Chrome 版本
 async function runProbe(browser, page) {
     console.log(">> [探测模式] 仅测试 Turnstile 能否通过，不登录、不续期");
     await clearCookies(page);
@@ -165,7 +182,6 @@ async function getTurnstileToken(page) {
     }).catch(() => null);
 }
 
-// 找到 Turnstile 组件在页面中的位置
 async function getTurnstileBox(page) {
     return await page.evaluate(() => {
         const pick = el => {
@@ -185,7 +201,6 @@ async function getTurnstileBox(page) {
     }).catch(() => null);
 }
 
-// 模拟人手：曲线移动 → 停顿 → 点击
 async function humanClick(page, x, y) {
     await page.mouse.move(x - rand(80, 160), y - rand(30, 80), { steps: 12 });
     await page.mouse.move(x, y, { steps: 18 });
@@ -193,14 +208,12 @@ async function humanClick(page, x, y) {
     await page.mouse.click(x, y, { delay: rand(60, 140) });
 }
 
-// 手动点击 Turnstile 复选框 (作为 puppeteer-real-browser 自动点击的兜底)
 async function clickTurnstile(page) {
     const box = await getTurnstileBox(page);
     if (!box) {
         console.log("   ↳ 未找到 Turnstile 组件位置，跳过手动点击");
         return false;
     }
-    // 复选框在组件左侧，距左边约 28px，垂直居中
     const x = box.x + 28 + rand(-3, 3);
     const y = box.y + box.h / 2 + rand(-3, 3);
     try {
@@ -208,7 +221,6 @@ async function clickTurnstile(page) {
         console.log(`   ↳ 已手动点击 Turnstile 复选框 (${Math.round(x)}, ${Math.round(y)})`);
         return true;
     } catch (e) {
-        // 插件自身的自动点击也在使用鼠标，偶尔会状态冲突，忽略即可
         console.log(`   ↳ 手动点击被跳过: ${e.message}`);
         await page.mouse.up().catch(() => {});
         return false;
@@ -221,8 +233,6 @@ async function resetTurnstile(page) {
     }).catch(() => {});
 }
 
-// 等待并协助完成 Turnstile。返回是否拿到 token
-// 节奏: 0~10s 交给插件自动点击 → 10s 手动点一次 → 25s 重置再点 → 40s 重置再点 → 超时失败
 async function solveTurnstile(page, totalSec = TURNSTILE_TIMEOUT_SEC) {
     const start = Date.now();
     const steps = [12, 28];
@@ -283,7 +293,6 @@ async function getLoginError(page) {
     }).catch(() => null);
 }
 
-// 提交后轮询判断是否登录成功 (离开登录页且不再有密码框)
 async function waitLoginResult(page, timeoutSec = 20) {
     for (let i = 0; i < timeoutSec; i++) {
         await delay(1000);
@@ -291,14 +300,12 @@ async function waitLoginResult(page, timeoutSec = 20) {
             const onLoginUrl = page.url().includes('/auth/login');
             const hasPwd = await page.$('input[type="password"]');
             if (!onLoginUrl && !hasPwd) return true;
-        } catch (e) {
-            // 页面跳转中，上下文被销毁，继续轮询
-        }
+        } catch (e) {}
     }
     return false;
 }
 
-// 带重试的登录。每次尝试都会清 Cookie、重新加载页面，返回是否成功
+// 账号密码登录重试
 async function loginWithRetry(page, user) {
     for (let attempt = 1; attempt <= MAX_LOGIN_ATTEMPTS; attempt++) {
         console.log(`>> 登录尝试 ${attempt}/${MAX_LOGIN_ATTEMPTS}`);
@@ -357,9 +364,44 @@ async function loginWithRetry(page, user) {
     return false;
 }
 
+// 降级 Cookie 登录
+async function loginWithCookie(page, cookieStr) {
+    if (!cookieStr) return false;
+    try {
+        console.log(">> 正在尝试使用 Cookie 登录...");
+        const cookies = cookieStr.split(';').map(item => {
+            const parts = item.trim().split('=');
+            if (parts.length >= 2) {
+                return {
+                    name: parts[0].trim(),
+                    value: parts.slice(1).join('=').trim(),
+                    domain: 'dashboard.katabump.com',
+                    path: '/'
+                };
+            }
+            return null;
+        }).filter(Boolean);
+
+        if (cookies.length > 0) {
+            await page.setCookie(...cookies);
+            await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+            await delay(3000);
+            
+            const onLoginUrl = page.url().includes('/auth/login');
+            const hasPwd = await page.$('input[type="password"]');
+            if (!onLoginUrl && !hasPwd) {
+                console.log("✅ Cookie 登录成功！");
+                return true;
+            }
+        }
+    } catch (e) {
+        console.log(`⚠️ Cookie 登录异常: ${e.message}`);
+    }
+    return false;
+}
+
 // ============ 页面信息提取 ============
 
-// 提取页面上的 Expiry (到期时间)
 async function getExpiryDate(page) {
     return await page.evaluate(() => {
         const allElements = Array.from(document.querySelectorAll('*'));
@@ -391,7 +433,6 @@ async function getExpiryDate(page) {
     });
 }
 
-// 提取页面上的红字警告提示
 async function getWarningMessage(page) {
     return await page.evaluate(() => {
         const errorSelectors = [
@@ -418,7 +459,6 @@ async function getWarningMessage(page) {
     });
 }
 
-// 根据按钮文本检查是否可见
 async function isBtnVisibleByText(page, text) {
     return await page.evaluate((txt) => {
         const elements = Array.from(document.querySelectorAll('button, a'));
@@ -431,7 +471,6 @@ async function isBtnVisibleByText(page, text) {
     }, text).catch(() => false);
 }
 
-// 点击主页面按钮
 async function clickBtnByText(page, text) {
     return await page.evaluate((txt) => {
         const elements = Array.from(document.querySelectorAll('button, a'));
@@ -472,13 +511,11 @@ async function clickBtnByText(page, text) {
         ignoreAllFlags: false
     };
 
-    // 如果工作流指定了 Chrome 路径，则使用该 Chrome
     if (CHROME_PATH) {
         connectOptions.customConfig.chromePath = CHROME_PATH;
         console.log(`🌐 使用指定的 Chrome: ${CHROME_PATH}`);
     }
 
-    // 代理只通过 --proxy-server 一处配置，避免与 proxy 字段重复冲突
     if (HTTP_PROXY) {
         try {
             const proxyUrl = new URL(HTTP_PROXY);
@@ -510,21 +547,26 @@ async function clickBtnByText(page, text) {
         process.exit(ok ? 0 : 1);
     }
 
-    // 所有用户复用同一个页面 (pRB 的 Turnstile 自动处理挂在初始页面上)，每个用户前清 Cookie
     for (let user of users) {
         try {
             console.log(`=== 处理用户: ${user.username} ===`);
 
-            // 1. 登录 (带重试，失败则直接通知并跳过该用户)
-            const loginOk = await loginWithRetry(page, user);
+            // 1. 登录逻辑：优先尝试账号密码登录；失败后若有配置 Cookie，自动降级为 Cookie 登录
+            let loginOk = await loginWithRetry(page, user);
+            if (!loginOk && user.cookie) {
+                console.log(`⚠️ 账号密码登录失败，正在自动切换为 Cookie 登录模式...`);
+                await clearCookies(page);
+                loginOk = await loginWithCookie(page, user.cookie);
+            }
+
             if (!loginOk) {
-                console.error(`❌ 用户 ${user.username} 登录失败，跳过续期`);
+                console.error(`❌ 用户 ${user.username} 登录失败（密码与Cookie均失效），跳过续期`);
                 process.exitCode = 1;
                 await sendTGMessage(
                     `❌ <b>Katabump 登录失败</b>\n` +
                     `👤 用户: <code>${esc(user.username)}</code>\n` +
-                    `🛡 原因: Cloudflare 验证在 ${MAX_LOGIN_ATTEMPTS} 次尝试内均未通过，或账号密码有误\n` +
-                    `📝 请查看工作流截图与日志中的 Chrome 版本/出口信息。`
+                    `🛡 原因: 账号密码/Turnstile 验证失败，且 Cookie 登录未生效。\n` +
+                    `📝 请检查工作流截图与 Cookie 是否过期。`
                 );
                 continue;
             }
@@ -581,7 +623,6 @@ async function clickBtnByText(page, text) {
                 await delay(1000);
                 await snap(page, `${user.username}_07_start_verifying`);
 
-                // 轮询等待 ALTCHA 计算完成并自动提交
                 console.log(">> 等待 PoW 算力验证完成与后端提交 (最大等待 90 秒)...");
                 let altchaPassed = false;
 
@@ -600,7 +641,6 @@ async function clickBtnByText(page, text) {
                             break;
                         }
                     } catch (error) {
-                        // 捕获页面刷新导致的错误
                         if (error.message.includes('Execution context was destroyed') ||
                             error.message.includes('Target closed') ||
                             error.message.includes('Session closed')) {
@@ -624,7 +664,6 @@ async function clickBtnByText(page, text) {
                 console.log(">> 正在等待页面重新加载最新数据...");
                 await delay(10000);
 
-                // 如果跳转丢了目标页面，重新导航回去获取最终日期
                 if (SERVER_URL && !page.url().includes(SERVER_URL)) {
                     await page.goto(SERVER_URL, { waitUntil: 'domcontentloaded' }).catch(() => {});
                     await delay(5000);
@@ -632,7 +671,6 @@ async function clickBtnByText(page, text) {
 
                 await snap(page, `${user.username}_08_after_renew_submit`);
 
-                // 4. 获取续期后数据与警告信息
                 warningMsg = await getWarningMessage(page);
                 if (warningMsg) {
                     console.log(`🔴 检测到警告提示: ${warningMsg}`);
@@ -645,7 +683,6 @@ async function clickBtnByText(page, text) {
                 console.log("⚠️ 页面未发现 Renew 按钮，可能已被抢先占满或账号状态异常");
             }
 
-            // 5. 结果逻辑比对
             const expiryBeforeDate = expiryBefore ? new Date(expiryBefore) : null;
             const expiryAfterDate = expiryAfter ? new Date(expiryAfter) : null;
 
@@ -659,7 +696,6 @@ async function clickBtnByText(page, text) {
                 }
             }
 
-            // 6. 构造 TG 消息格式
             let tgMsg = "";
             if (isRenewed) {
                 tgMsg = `🎉 <b>Katabump 续期成功！</b>\n` +
