@@ -32,17 +32,25 @@ async function snap(page, label) {
     }
 }
 
-// 提取用户配置 (支持 JSON 数组，或每行 "邮箱:密码"，并自动匹配 COOKIES_JSON)
+// 提取用户配置 (完美兼容：支持 JSON 对象映射，也支持直接粘贴一整串原始 Cookie 字符串)
 function getUsers() {
     const raw = process.env.USERS_JSON || '';
     const cookiesRaw = process.env.COOKIES_JSON || '';
     
     let cookiesMap = {};
+    let directCookie = '';
+    
     try {
-        if (cookiesRaw.trim().startsWith('{')) {
-            cookiesMap = JSON.parse(cookiesRaw);
+        const trimmed = cookiesRaw.trim();
+        if (trimmed.startsWith('{')) {
+            cookiesMap = JSON.parse(trimmed);
+        } else if (trimmed.length > 0) {
+            // 如果没有用大括号包起来，说明直接复制了一整串 Cookie
+            directCookie = trimmed;
         }
-    } catch (e) {}
+    } catch (e) {
+        directCookie = cookiesRaw.trim();
+    }
 
     let users = [];
     try {
@@ -60,10 +68,10 @@ function getUsers() {
         }
     } catch (e) {}
 
-    // 将环境变量中的 Cookie 绑定到对应的用户对象上
+    // 自动为用户绑定 Cookie（优先从 JSON 匹配，没有则直接使用一整串直填 Cookie）
     return users.map(u => {
-        if (!u.cookie && cookiesMap[u.username]) {
-            u.cookie = cookiesMap[u.username];
+        if (!u.cookie) {
+            u.cookie = cookiesMap[u.username] || directCookie;
         }
         return u;
     });
@@ -92,7 +100,7 @@ async function sendTGMessage(msg) {
     }
 }
 
-// 清除浏览器全部 Cookie (保证多账号之间互不串号，重试登录时也是干净状态)
+// 清除浏览器全部 Cookie
 async function clearCookies(page) {
     try {
         const client = await page.target().createCDPSession();
@@ -551,7 +559,7 @@ async function clickBtnByText(page, text) {
         try {
             console.log(`=== 处理用户: ${user.username} ===`);
 
-            // 1. 登录逻辑：优先尝试账号密码登录；失败后若有配置 Cookie，自动降级为 Cookie 登录
+            // 1. 登录逻辑：先尝试账号密码；失败后自动降级为 Cookie 登录
             let loginOk = await loginWithRetry(page, user);
             if (!loginOk && user.cookie) {
                 console.log(`⚠️ 账号密码登录失败，正在自动切换为 Cookie 登录模式...`);
