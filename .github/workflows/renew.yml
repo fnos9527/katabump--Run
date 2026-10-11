@@ -225,6 +225,7 @@ jobs:
     - name: Run Renew Script
       env:
         USERS_JSON: ${{ secrets.USERS_JSON }}
+        COOKIES_JSON: ${{ secrets.COOKIES_JSON }}
         SERVER_URL: ${{ secrets.SERVER_URL }}
         TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
         TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
