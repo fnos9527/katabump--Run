@@ -1,8 +1,10 @@
 # katabump--Run
-USERS_JSON   =你的邮箱:你的密码     
-SERVER_URL     =See链接     
-HTTP_PROXY   =VLESS 格式    
-COOKIES_JSON
+KB_EMAIL    
+KB_PASSWORD   
+TG_BOT_TOKEN   
+TG_CHAT_ID   
+NODE_LINK   
+SERVER_ID   
 
 vless:// 链接.改为读取 URL 里的 type 参数（默认 tcp），根据值分别生成 wsSettings / tcpSettings / grpcSettings / httpSettings兼容多种格式。   
 增加 fp（TLS 指纹）和 insecure/allowInsecure 的兼容处理，两种参数名都认，值为 1 或 true 都算跳过证书校验    
