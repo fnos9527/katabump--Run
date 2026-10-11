@@ -8,11 +8,11 @@ const TG_CHAT_ID = process.env.TG_CHAT_ID;
 const SERVER_URL = process.env.SERVER_URL ? process.env.SERVER_URL.trim() : '';
 const HTTP_PROXY = process.env.HTTP_PROXY;
 const CHROME_PATH = process.env.CHROME_PATH ? process.env.CHROME_PATH.trim() : '';
-const PROBE_ONLY = process.env.PROBE_ONLY === '1'; // 探测模式：只测 Turnstile，不登录不续期
+const PROBE_ONLY = process.env.PROBE_ONLY === '1';
 
 const LOGIN_URL = 'https://dashboard.katabump.com/auth/login';
-const MAX_LOGIN_ATTEMPTS = 3;      // 登录最大重试次数
-const TURNSTILE_TIMEOUT_SEC = 45;  // 单次登录尝试中等待 Turnstile 的最长秒数
+const MAX_LOGIN_ATTEMPTS = 3;      // 最大重试次数
+const TURNSTILE_TIMEOUT_SEC = 50;  // 等待 Turnstile 验证的最长时间
 
 const SCREENSHOT_DIR = path.join(__dirname, 'screenshots');
 if (!fs.existsSync(SCREENSHOT_DIR)) fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
@@ -32,47 +32,21 @@ async function snap(page, label) {
     }
 }
 
-// 提取用户配置 (支持 JSON 对象，也支持直接粘贴一整串原始 Cookie 字符串)
+// 提取用户配置 (仅支持 USERS_JSON)
 function getUsers() {
     const raw = process.env.USERS_JSON || '';
-    const cookiesRaw = process.env.COOKIES_JSON || '';
-    
-    let cookiesMap = {};
-    let directCookie = '';
-    
+    if (!raw) return [];
     try {
-        const trimmed = cookiesRaw.trim();
-        if (trimmed.startsWith('{')) {
-            cookiesMap = JSON.parse(trimmed);
-        } else if (trimmed.length > 0) {
-            directCookie = trimmed;
-        }
-    } catch (e) {
-        directCookie = cookiesRaw.trim();
-    }
-
-    let users = [];
-    try {
-        if (raw.trim().startsWith('[')) {
-            users = JSON.parse(raw);
-        } else {
-            users = raw.split('\n').map(line => {
-                const l = line.trim();
-                const idx = l.indexOf(':');
-                if (idx <= 0) return null;
-                const username = l.slice(0, idx).trim();
-                const password = l.slice(idx + 1).trim();
-                return (username && password) ? { username, password } : null;
-            }).filter(Boolean);
-        }
+        if (raw.trim().startsWith('[')) return JSON.parse(raw);
     } catch (e) {}
-
-    return users.map(u => {
-        if (!u.cookie) {
-            u.cookie = cookiesMap[u.username] || directCookie;
-        }
-        return u;
-    });
+    return raw.split('\n').map(line => {
+        const l = line.trim();
+        const idx = l.indexOf(':');
+        if (idx <= 0) return null;
+        const username = l.slice(0, idx).trim();
+        const password = l.slice(idx + 1).trim();
+        return (username && password) ? { username, password } : null;
+    }).filter(Boolean);
 }
 
 // 发送 Telegram 消息
@@ -150,7 +124,7 @@ async function runProbe(browser, page) {
     return ok;
 }
 
-// ============ Cloudflare Turnstile 相关 ============
+// ============ 核心优化：精准穿透 Frame 的 Turnstile 验证 ============
 
 async function getTurnstileToken(page) {
     return await page.evaluate(() => {
@@ -159,49 +133,26 @@ async function getTurnstileToken(page) {
     }).catch(() => null);
 }
 
-async function getTurnstileBox(page) {
-    return await page.evaluate(() => {
-        const pick = el => {
-            if (!el) return null;
-            const r = el.getBoundingClientRect();
-            if (r.width > 50 && r.height > 30 && r.width <= 500 && r.height <= 150) {
-                return { x: r.x, y: r.y, w: r.width, h: r.height };
-            }
-            return null;
-        };
-        let box = pick(document.querySelector('iframe[src*="challenges.cloudflare.com"]'));
-        if (box) return box;
-        const input = document.querySelector('[name="cf-turnstile-response"]');
-        box = pick(input && input.parentElement);
-        if (box) return box;
-        return pick(document.querySelector('.cf-turnstile, [data-sitekey]'));
-    }).catch(() => null);
-}
-
-async function humanClick(page, x, y) {
-    await page.mouse.move(x - rand(80, 160), y - rand(30, 80), { steps: 12 });
-    await page.mouse.move(x, y, { steps: 18 });
-    await delay(rand(150, 350));
-    await page.mouse.click(x, y, { delay: rand(60, 140) });
-}
-
-async function clickTurnstile(page) {
-    const box = await getTurnstileBox(page);
-    if (!box) {
-        console.log("   ↳ 未找到 Turnstile 组件位置，跳过手动点击");
-        return false;
-    }
-    const x = box.x + 28 + rand(-3, 3);
-    const y = box.y + box.h / 2 + rand(-3, 3);
+// 深入 Cloudflare 内部 iframe 直接点击复选框
+async function clickTurnstileInsideFrame(page) {
     try {
-        await humanClick(page, x, y);
-        console.log(`   ↳ 已手动点击 Turnstile 复选框 (${Math.round(x)}, ${Math.round(y)})`);
-        return true;
+        const frames = page.frames();
+        for (const frame of frames) {
+            if (frame.url().includes('challenges.cloudflare.com')) {
+                console.log("   ↳ 发现 Cloudflare 验证 iframe，正在尝试点击复选框...");
+                // 尝试点击 iframe 内部的复选框或标签
+                const checkbox = await frame.$('input[type="checkbox"], label, .cb-lb, div[role="checkbox"]');
+                if (checkbox) {
+                    await checkbox.click();
+                    console.log("   ↳ 成功触发 iframe 内部验证点击！");
+                    return true;
+                }
+            }
+        }
     } catch (e) {
-        console.log(`   ↳ 手动点击被跳过: ${e.message}`);
-        await page.mouse.up().catch(() => {});
-        return false;
+        console.log(`   ↳ iframe 点击辅助提示: ${e.message}`);
     }
+    return false;
 }
 
 async function resetTurnstile(page) {
@@ -212,28 +163,35 @@ async function resetTurnstile(page) {
 
 async function solveTurnstile(page, totalSec = TURNSTILE_TIMEOUT_SEC) {
     const start = Date.now();
-    const steps = [12, 28];
-    let stepIdx = 0;
+    let helperCount = 0;
 
     while ((Date.now() - start) / 1000 < totalSec) {
-        if (await getTurnstileToken(page)) return true;
-
-        const t = (Date.now() - start) / 1000;
-        if (stepIdx < steps.length && t >= steps[stepIdx]) {
-            console.log(`   ↳ ${Math.round(t)}s 仍未拿到 token，进行第 ${stepIdx + 1} 次辅助处理`);
-            if (stepIdx > 0) {
-                await resetTurnstile(page);
-                await delay(3000);
-            }
-            await clickTurnstile(page);
-            stepIdx++;
+        if (await getTurnstileToken(page)) {
+            console.log("✅ 成功获取到 Cloudflare Turnstile Token！");
+            return true;
         }
-        await delay(2000);
+
+        const elapsed = (Date.now() - start) / 1000;
+        
+        // 在第 8 秒、第 20 秒、第 35 秒进行主动触发兜底
+        if ((elapsed >= 8 && helperCount === 0) || 
+            (elapsed >= 20 && helperCount === 1) || 
+            (elapsed >= 35 && helperCount === 2)) {
+            helperCount++;
+            console.log(`   ↳ 耗时 ${Math.round(elapsed)}s 尚未自动通过，进行第 ${helperCount} 次辅助干预...`);
+            if (helperCount > 1) {
+                await resetTurnstile(page);
+                await delay(2000);
+            }
+            await clickTurnstileInsideFrame(page);
+        }
+
+        await delay(1500);
     }
     return !!(await getTurnstileToken(page));
 }
 
-// ============ 登录相关 ============
+// ============ 登录表单处理 ============
 
 async function fillLoginForm(page, user) {
     await page.focus('input[type="email"]');
@@ -304,23 +262,24 @@ async function loginWithRetry(page, user) {
             }
             await page.waitForSelector('input[type="password"]', { timeout: 15000 });
 
+            // 填写账号密码
             await fillLoginForm(page, user);
             await snap(page, `${tag}_02_filled_form`);
 
-            console.log(">> 等待 Cloudflare Turnstile 验证 (含自动/手动点击兜底)...");
+            console.log(">> 等待 Cloudflare Turnstile 验证完成...");
             const verified = await solveTurnstile(page);
             await snap(page, `${tag}_03_after_token_wait`);
 
             if (!verified) {
                 console.log(`⚠️ 第 ${attempt} 次尝试: Turnstile 未通过，不提交表单`);
             } else {
-                console.log("✅ Cloudflare 验证通过，提交登录");
+                console.log("✅ Cloudflare 验证通过，正在点击登录按钮...");
                 await delay(rand(500, 1200));
                 await page.click('button[type="submit"]');
                 const ok = await waitLoginResult(page, 20);
                 await snap(page, `${tag}_04_after_submit`);
                 if (ok) {
-                    console.log("✅ 登录成功");
+                    console.log("✅ 登录成功！");
                     return true;
                 }
                 const err = await getLoginError(page);
@@ -332,7 +291,7 @@ async function loginWithRetry(page, user) {
         }
 
         if (attempt < MAX_LOGIN_ATTEMPTS) {
-            const wait = rand(5000, 9000);
+            const wait = rand(6000, 10000);
             console.log(`>> ${Math.round(wait / 1000)} 秒后重试...`);
             await delay(wait);
         }
@@ -340,56 +299,7 @@ async function loginWithRetry(page, user) {
     return false;
 }
 
-// 修复后的 Cookie 登录：直接跳转到目标服务器页面或主面板，彻底避免重定向死循环
-async function loginWithCookie(page, cookieStr) {
-    if (!cookieStr) return false;
-    try {
-        console.log(">> 正在尝试使用 Cookie 登录...");
-        
-        // 先打开主域名建立环境
-        await page.goto('https://dashboard.katabump.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
-        await delay(2000);
-
-        const cookies = cookieStr.split(';').map(item => {
-            const parts = item.trim().split('=');
-            if (parts.length >= 2) {
-                const name = parts[0].trim();
-                const value = parts.slice(1).join('=').trim();
-                if (!name) return null;
-                return {
-                    name: name,
-                    value: value,
-                    domain: 'dashboard.katabump.com',
-                    path: '/'
-                };
-            }
-            return null;
-        }).filter(Boolean);
-
-        if (cookies.length > 0) {
-            await page.setCookie(...cookies);
-            
-            // 直接跳转到用户配置的服务器页面（或主面板），不再访问登录页，防止死循环
-            const targetUrl = SERVER_URL || 'https://dashboard.katabump.com/';
-            await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-            await delay(4000);
-            
-            const onLoginUrl = page.url().includes('/auth/login');
-            const hasPwd = await page.$('input[type="password"]');
-            if (!onLoginUrl && !hasPwd) {
-                console.log("✅ Cookie 登录成功并成功进入后台！");
-                return true;
-            } else {
-                console.log("⚠️ Cookie 登录后被重定向回登录页，可能 Cookie 已失效或不完整。");
-            }
-        }
-    } catch (e) {
-        console.log(`⚠️ Cookie 登录异常: ${e.message}`);
-    }
-    return false;
-}
-
-// ============ 页面信息提取 ============
+// ============ 页面信息提取与续期流程 ============
 
 async function getExpiryDate(page) {
     return await page.evaluate(() => {
@@ -540,28 +450,23 @@ async function clickBtnByText(page, text) {
         try {
             console.log(`=== 处理用户: ${user.username} ===`);
 
-            // 1. 密码登录重试失败后，无缝切入 Cookie 登录
-            let loginOk = await loginWithRetry(page, user);
-            if (!loginOk && user.cookie) {
-                console.log(`⚠️ 账号密码登录失败，正在自动切换为 Cookie 登录模式...`);
-                await clearCookies(page);
-                loginOk = await loginWithCookie(page, user.cookie);
-            }
+            // 1. 纯账号密码 + Turnstile 自动化登录
+            const loginOk = await loginWithRetry(page, user);
 
             if (!loginOk) {
-                console.error(`❌ 用户 ${user.username} 登录失败（密码与Cookie均失效），跳过续期`);
+                console.error(`❌ 用户 ${user.username} 登录失败，跳过续期`);
                 process.exitCode = 1;
                 await sendTGMessage(
                     `❌ <b>Katabump 登录失败</b>\n` +
                     `👤 用户: <code>${esc(user.username)}</code>\n` +
-                    `🛡 原因: 账号密码/Turnstile 验证失败，且 Cookie 登录未生效。\n` +
-                    `📝 请检查工作流截图与 Cookie 是否过期。`
+                    `🛡 原因: 账号密码或 Cloudflare Turnstile 验证未能在 ${MAX_LOGIN_ATTEMPTS} 次尝试内通过。\n` +
+                    `📝 请查看工作流截图。`
                 );
                 continue;
             }
 
-            // 2. 已经是登录态，直接导航或确认服务器页面
-            if (SERVER_URL && !page.url().includes(SERVER_URL)) {
+            // 2. 导航到服务器页面
+            if (SERVER_URL) {
                 await page.goto(SERVER_URL, { waitUntil: 'domcontentloaded' });
                 await delay(3000);
                 await snap(page, `${user.username}_05_server_page`);
