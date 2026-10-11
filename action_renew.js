@@ -11,8 +11,8 @@ const CHROME_PATH = process.env.CHROME_PATH ? process.env.CHROME_PATH.trim() : '
 const PROBE_ONLY = process.env.PROBE_ONLY === '1';
 
 const LOGIN_URL = 'https://dashboard.katabump.com/auth/login';
-const MAX_LOGIN_ATTEMPTS = 3;      // 最大重试次数
-const TURNSTILE_TIMEOUT_SEC = 50;  // 等待 Turnstile 验证的最长时间
+const MAX_LOGIN_ATTEMPTS = 2;      // 已按要求将最大重试次数改为 2 次
+const TURNSTILE_TIMEOUT_SEC = 40;  // 单次等待验证时间
 
 const SCREENSHOT_DIR = path.join(__dirname, 'screenshots');
 if (!fs.existsSync(SCREENSHOT_DIR)) fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
@@ -32,7 +32,7 @@ async function snap(page, label) {
     }
 }
 
-// 提取用户配置 (仅支持 USERS_JSON)
+// 提取用户配置
 function getUsers() {
     const raw = process.env.USERS_JSON || '';
     if (!raw) return [];
@@ -106,25 +106,7 @@ async function logEnvironment(browser, page) {
     }
 }
 
-async function runProbe(browser, page) {
-    console.log(">> [探测模式] 仅测试 Turnstile 能否通过，不登录、不续期");
-    await clearCookies(page);
-    await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await delay(2000);
-    await snap(page, 'probe_01_login_page');
-    const ok = await solveTurnstile(page);
-    await snap(page, 'probe_02_result');
-    let ver = '';
-    try { ver = await browser.version(); } catch (e) {}
-    const line = `Turnstile 探测 [${ver}]: ${ok ? '✅ PASS' : '❌ FAIL'}`;
-    console.log(line);
-    if (process.env.GITHUB_STEP_SUMMARY) {
-        try { fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, line + '\n'); } catch (e) {}
-    }
-    return ok;
-}
-
-// ============ 核心优化：精准穿透 Frame 的 Turnstile 验证 ============
+// ============ Turnstile 智能穿透与容错 ============
 
 async function getTurnstileToken(page) {
     return await page.evaluate(() => {
@@ -133,24 +115,33 @@ async function getTurnstileToken(page) {
     }).catch(() => null);
 }
 
-// 深入 Cloudflare 内部 iframe 直接点击复选框
+// 检测并点击 iframe 内的复选框或错误重试按钮
 async function clickTurnstileInsideFrame(page) {
     try {
         const frames = page.frames();
         for (const frame of frames) {
             if (frame.url().includes('challenges.cloudflare.com')) {
-                console.log("   ↳ 发现 Cloudflare 验证 iframe，正在尝试点击复选框...");
-                // 尝试点击 iframe 内部的复选框或标签
+                // 检查是否有报错提示或需要点击的复选框
+                const bodyText = await frame.evaluate(() => document.body.innerText).catch(() => '');
+                if (bodyText.includes('Verification failed') || bodyText.includes('Troubleshoot')) {
+                    console.log("   ↳ 检测到 Cloudflare 验证失败提示，正在点击重试...");
+                    const troubleshootBtn = await frame.$('a, button, div[role="button"]');
+                    if (troubleshootBtn) {
+                        await troubleshootBtn.click();
+                        return true;
+                    }
+                }
+
                 const checkbox = await frame.$('input[type="checkbox"], label, .cb-lb, div[role="checkbox"]');
                 if (checkbox) {
                     await checkbox.click();
-                    console.log("   ↳ 成功触发 iframe 内部验证点击！");
+                    console.log("   ↳ 成功点击 Turnstile 验证复选框！");
                     return true;
                 }
             }
         }
     } catch (e) {
-        console.log(`   ↳ iframe 点击辅助提示: ${e.message}`);
+        console.log(`   ↳ 辅助干预提示: ${e.message}`);
     }
     return false;
 }
@@ -173,15 +164,13 @@ async function solveTurnstile(page, totalSec = TURNSTILE_TIMEOUT_SEC) {
 
         const elapsed = (Date.now() - start) / 1000;
         
-        // 在第 8 秒、第 20 秒、第 35 秒进行主动触发兜底
-        if ((elapsed >= 8 && helperCount === 0) || 
-            (elapsed >= 20 && helperCount === 1) || 
-            (elapsed >= 35 && helperCount === 2)) {
+        // 在第 7 秒、第 20 秒主动干预
+        if ((elapsed >= 7 && helperCount === 0) || (elapsed >= 20 && helperCount === 1)) {
             helperCount++;
             console.log(`   ↳ 耗时 ${Math.round(elapsed)}s 尚未自动通过，进行第 ${helperCount} 次辅助干预...`);
             if (helperCount > 1) {
                 await resetTurnstile(page);
-                await delay(2000);
+                await delay(1500);
             }
             await clickTurnstileInsideFrame(page);
         }
@@ -196,11 +185,11 @@ async function solveTurnstile(page, totalSec = TURNSTILE_TIMEOUT_SEC) {
 async function fillLoginForm(page, user) {
     await page.focus('input[type="email"]');
     await page.evaluate(() => { document.querySelector('input[type="email"]').value = ''; });
-    await page.type('input[type="email"]', user.username, { delay: 100 });
+    await page.type('input[type="email"]', user.username, { delay: 80 });
 
     await page.focus('input[type="password"]');
     await page.evaluate(() => { document.querySelector('input[type="password"]').value = ''; });
-    await page.type('input[type="password"]', user.password, { delay: 100 });
+    await page.type('input[type="password"]', user.password, { delay: 80 });
 
     const checkedEmail = await page.$eval('input[type="email"]', el => el.value);
     const checkedPassword = await page.$eval('input[type="password"]', el => el.value);
@@ -262,7 +251,6 @@ async function loginWithRetry(page, user) {
             }
             await page.waitForSelector('input[type="password"]', { timeout: 15000 });
 
-            // 填写账号密码
             await fillLoginForm(page, user);
             await snap(page, `${tag}_02_filled_form`);
 
@@ -274,7 +262,7 @@ async function loginWithRetry(page, user) {
                 console.log(`⚠️ 第 ${attempt} 次尝试: Turnstile 未通过，不提交表单`);
             } else {
                 console.log("✅ Cloudflare 验证通过，正在点击登录按钮...");
-                await delay(rand(500, 1200));
+                await delay(rand(400, 1000));
                 await page.click('button[type="submit"]');
                 const ok = await waitLoginResult(page, 20);
                 await snap(page, `${tag}_04_after_submit`);
@@ -291,7 +279,7 @@ async function loginWithRetry(page, user) {
         }
 
         if (attempt < MAX_LOGIN_ATTEMPTS) {
-            const wait = rand(6000, 10000);
+            const wait = rand(4000, 7000);
             console.log(`>> ${Math.round(wait / 1000)} 秒后重试...`);
             await delay(wait);
         }
@@ -450,7 +438,6 @@ async function clickBtnByText(page, text) {
         try {
             console.log(`=== 处理用户: ${user.username} ===`);
 
-            // 1. 纯账号密码 + Turnstile 自动化登录
             const loginOk = await loginWithRetry(page, user);
 
             if (!loginOk) {
@@ -465,7 +452,6 @@ async function clickBtnByText(page, text) {
                 continue;
             }
 
-            // 2. 导航到服务器页面
             if (SERVER_URL) {
                 await page.goto(SERVER_URL, { waitUntil: 'domcontentloaded' });
                 await delay(3000);
@@ -488,7 +474,6 @@ async function clickBtnByText(page, text) {
             let warningMsg = null;
             let expiryAfter = null;
 
-            // 3. 执行续期弹窗与 ALTCHA 验证
             if (await isBtnVisibleByText(page, "Renew")) {
                 console.log(">> 找到主页面 Renew 按钮，开始点击打开弹窗...");
                 await clickBtnByText(page, "Renew");
