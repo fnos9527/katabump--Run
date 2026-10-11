@@ -1,0 +1,98 @@
+name: KataBump Auto Renew
+
+on:
+  schedule:
+    - cron: "17 2 * * *"   # 每天 UTC 02:17(北京时间 10:17),可自行修改
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: katabump-renew
+  cancel-in-progress: false
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      KB_EMAIL: ${{ secrets.KB_EMAIL }}
+      KB_PASSWORD: ${{ secrets.KB_PASSWORD }}
+      TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+      TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+      NODE_LINK: ${{ secrets.NODE_LINK }}
+      SERVER_ID: ${{ secrets.SERVER_ID || '250571' }}
+      COOKIE_FILE: ${{ github.workspace }}/cookies/katabump.json
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install seleniumbase requests
+          sudo apt-get update -y && sudo apt-get install -y xvfb
+
+      # ---- 恢复上次保存的 cookie ----
+      - name: Restore cookies
+        uses: actions/cache/restore@v4
+        with:
+          path: cookies
+          key: katabump-cookies-${{ github.run_id }}
+          restore-keys: katabump-cookies-
+
+      # ---- 可选:VLESS 节点 -> sing-box 本地 SOCKS5 ----
+      - name: Setup optional VLESS node
+        run: |
+          if [ -z "$NODE_LINK" ]; then
+            echo "NODE_LINK 为空,直连"
+            echo "IS_PROXY=false" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          set -e
+          URL=$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest \
+            | grep -o 'https://[^"]*linux-amd64\.tar\.gz' | head -n1)
+          curl -fsSL "$URL" -o sb.tgz
+          mkdir -p sb && tar -xzf sb.tgz -C sb --strip-components=1
+          python scripts/vless_to_singbox.py "$NODE_LINK" > sb/config.json
+          nohup ./sb/sing-box run -c sb/config.json > sb/sing-box.log 2>&1 &
+          echo $! > sb/pid
+          sleep 4
+          if curl -fsS --max-time 15 --socks5-hostname 127.0.0.1:1080 https://api.ipify.org; then
+            echo; echo "代理可用"
+            echo "IS_PROXY=true" >> "$GITHUB_ENV"
+          else
+            echo "代理不可用,回退直连"; tail -n 20 sb/sing-box.log || true
+            echo "IS_PROXY=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: Renew
+        run: python scripts/renew.py
+
+      # ---- 无论成败都保存 cookie ----
+      - name: Save cookies
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: cookies
+          key: katabump-cookies-${{ github.run_id }}
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: shots/
+          if-no-files-found: ignore
+          retention-days: 3
+
+      - name: Cleanup proxy
+        if: always()
+        run: |
+          [ -f sb/pid ] && kill -9 "$(cat sb/pid)" 2>/dev/null || true
+          pkill -9 sing-box 2>/dev/null || true
+          rm -rf sb sb.tgz
