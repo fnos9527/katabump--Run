@@ -32,7 +32,7 @@ async function snap(page, label) {
     }
 }
 
-// 提取用户配置 (完美兼容：支持 JSON 对象映射，也支持直接粘贴一整串原始 Cookie 字符串)
+// 提取用户配置 (支持 JSON 对象，也支持直接粘贴一整串原始 Cookie 字符串)
 function getUsers() {
     const raw = process.env.USERS_JSON || '';
     const cookiesRaw = process.env.COOKIES_JSON || '';
@@ -45,7 +45,6 @@ function getUsers() {
         if (trimmed.startsWith('{')) {
             cookiesMap = JSON.parse(trimmed);
         } else if (trimmed.length > 0) {
-            // 如果没有用大括号包起来，说明直接复制了一整串 Cookie
             directCookie = trimmed;
         }
     } catch (e) {
@@ -68,7 +67,6 @@ function getUsers() {
         }
     } catch (e) {}
 
-    // 自动为用户绑定 Cookie（优先从 JSON 匹配，没有则直接使用一整串直填 Cookie）
     return users.map(u => {
         if (!u.cookie) {
             u.cookie = cookiesMap[u.username] || directCookie;
@@ -100,7 +98,6 @@ async function sendTGMessage(msg) {
     }
 }
 
-// 清除浏览器全部 Cookie
 async function clearCookies(page) {
     try {
         const client = await page.target().createCDPSession();
@@ -111,7 +108,6 @@ async function clearCookies(page) {
     }
 }
 
-// 启动后打印环境信息，并把浏览器时区对齐到代理出口 IP 所在时区
 async function logEnvironment(browser, page) {
     try { console.log(`>> Chrome 版本: ${await browser.version()}`); } catch (e) {}
 
@@ -133,33 +129,6 @@ async function logEnvironment(browser, page) {
         }
     } catch (e) {
         console.log(`⚠️ 时区对齐已跳过: ${e.message}`);
-    }
-
-    try {
-        const sig = await page.evaluate(() => {
-            let webgl = '';
-            try {
-                const g = document.createElement('canvas').getContext('webgl');
-                const ext = g && g.getExtension('WEBGL_debug_renderer_info');
-                webgl = ext ? g.getParameter(ext.UNMASKED_RENDERER_WEBGL) : 'no-ext';
-            } catch (e) { webgl = 'err'; }
-            return {
-                webdriver: navigator.webdriver,
-                plugins: navigator.plugins.length,
-                languages: navigator.languages.join(','),
-                timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-                windowChrome: typeof window.chrome,
-                cores: navigator.hardwareConcurrency,
-                screen: `${screen.width}x${screen.height}`,
-                inner: `${innerWidth}x${innerHeight}`,
-                outer: `${outerWidth}x${outerHeight}`,
-                webgl
-            };
-        });
-        console.log(`>> UA: ${await page.evaluate(() => navigator.userAgent)}`);
-        console.log(`>> 指纹信号: ${JSON.stringify(sig)}`);
-    } catch (e) {
-        console.log(`⚠️ 指纹信号获取失败: ${e.message}`);
     }
 }
 
@@ -313,7 +282,6 @@ async function waitLoginResult(page, timeoutSec = 20) {
     return false;
 }
 
-// 账号密码登录重试
 async function loginWithRetry(page, user) {
     for (let attempt = 1; attempt <= MAX_LOGIN_ATTEMPTS; attempt++) {
         console.log(`>> 登录尝试 ${attempt}/${MAX_LOGIN_ATTEMPTS}`);
@@ -372,19 +340,26 @@ async function loginWithRetry(page, user) {
     return false;
 }
 
-// 降级 Cookie 登录
+// 优化后的降级 Cookie 登录（修复域匹配与加载问题）
 async function loginWithCookie(page, cookieStr) {
     if (!cookieStr) return false;
     try {
         console.log(">> 正在尝试使用 Cookie 登录...");
+        
+        // 先导航至登录页，让浏览器上下文对准该域名
+        await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await delay(2000);
+
         const cookies = cookieStr.split(';').map(item => {
             const parts = item.trim().split('=');
             if (parts.length >= 2) {
+                const name = parts[0].trim();
+                const value = parts.slice(1).join('=').trim();
+                if (!name) return null;
                 return {
-                    name: parts[0].trim(),
-                    value: parts.slice(1).join('=').trim(),
-                    domain: 'dashboard.katabump.com',
-                    path: '/'
+                    name: name,
+                    value: value,
+                    url: LOGIN_URL // 使用 url 让浏览器自动匹配正确的域和路径
                 };
             }
             return null;
@@ -392,7 +367,8 @@ async function loginWithCookie(page, cookieStr) {
 
         if (cookies.length > 0) {
             await page.setCookie(...cookies);
-            await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+            // 写入 Cookie 后重新加载页面使其生效
+            await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
             await delay(3000);
             
             const onLoginUrl = page.url().includes('/auth/login');
@@ -400,6 +376,8 @@ async function loginWithCookie(page, cookieStr) {
             if (!onLoginUrl && !hasPwd) {
                 console.log("✅ Cookie 登录成功！");
                 return true;
+            } else {
+                console.log("⚠️ Cookie 登录后仍停留在登录页，可能 Cookie 已过期或不完整。");
             }
         }
     } catch (e) {
@@ -559,7 +537,7 @@ async function clickBtnByText(page, text) {
         try {
             console.log(`=== 处理用户: ${user.username} ===`);
 
-            // 1. 登录逻辑：先尝试账号密码；失败后自动降级为 Cookie 登录
+            // 1. 登录逻辑：密码重试失败后，无缝切入 Cookie 降级登录
             let loginOk = await loginWithRetry(page, user);
             if (!loginOk && user.cookie) {
                 console.log(`⚠️ 账号密码登录失败，正在自动切换为 Cookie 登录模式...`);
