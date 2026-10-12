@@ -22,6 +22,14 @@ os.makedirs("shots", exist_ok=True)
 os.makedirs(os.path.dirname(COOKIE_FILE), exist_ok=True)
 
 
+def js(sb, body: str):
+    """兼容 WebDriver 模式(需要 return)和 CDP 模式(只能是表达式)。"""
+    try:
+        return sb.execute_script("return (function(){" + body + "})()")
+    except Exception:
+        return sb.execute_script("(function(){" + body + "})()")
+
+
 def tg(text: str):
     print("[TG]", text)
     if not (TG_TOKEN and TG_CHAT):
@@ -41,7 +49,7 @@ def shot(sb, name):
 
 
 def body_text(sb) -> str:
-    return sb.execute_script("return document.body.innerText") or ""
+    return js(sb, "return document.body ? document.body.innerText : '';") or ""
 
 
 def get_expiry(sb) -> str | None:
@@ -51,7 +59,7 @@ def get_expiry(sb) -> str | None:
 
 def get_alert(sb) -> str:
     """读取页面顶部提示:优先 .alert,其次 URL 里的 renew-error 参数。"""
-    txt = sb.execute_script("""
+    txt = js(sb, """
         const a=[...document.querySelectorAll('.alert, [role=alert]')]
           .map(e=>e.innerText.trim()).filter(Boolean);
         return a.join('\\n');""") or ""
@@ -64,6 +72,10 @@ def get_alert(sb) -> str:
 
 def save_cookies(sb):
     try:
+        try:
+            sb.driver.connect()  # uc 模式下 driver 可能处于断开状态
+        except Exception:
+            pass
         with open(COOKIE_FILE, "w") as f:
             json.dump(sb.driver.get_cookies(), f)
         print("cookie 已保存")
@@ -90,9 +102,8 @@ def load_cookies(sb) -> bool:
 
 
 def turnstile_token(sb) -> str:
-    return sb.execute_script(
-        "const e=document.querySelector('[name=cf-turnstile-response]');"
-        "return e?e.value:''") or ""
+    return js(sb, "const e=document.querySelector('[name=cf-turnstile-response]');"
+                  "return e?e.value:'';") or ""
 
 
 def pass_cf(sb, timeout=60):
