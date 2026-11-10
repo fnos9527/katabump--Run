@@ -28,3 +28,5 @@ GitHub Secrets 里有一个可选密钥：NODE_LINK（VLESS 节点链接 根据�
 如果 NODE_LINK 为空 → 直接设置 IS_PROXY=false，全程走直连。
 脚本成功后，会在 本机 上监听本地 SOCKS5 代理：socks5://127.0.0.1:1080（默认）。 浏览器（登录、点续期）→ 走这个本地代理.
 工作流结束时（Cleanup proxy）会强制杀掉 sing-box 进程并清理配置文件。
+
+-引入 puppeteer-real-browser 插件。
